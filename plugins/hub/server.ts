@@ -1292,6 +1292,14 @@ export default async function plugin(bb: BbPluginApi) {
           const otherId = await readPackageJson(await syncMirror(other), other.path).then((manifest) => pluginIdForPackageName(manifest.name), () => null);
           if (otherId === pluginId) throw new Error(`Plugin id "${pluginId}" is already used by ${labelFor(other, packagesRepo)}.`);
         }
+        for (const entry of packages.marketplace) {
+          const plan = await bb.sdk.plugins.catalog
+            .installPlan({ entryId: entry.id, ...(entry.marketplace ? { marketplace: entry.marketplace } : {}) })
+            .catch(() => null);
+          if (plan?.pluginId === pluginId) {
+            throw new Error(`Plugin id "${pluginId}" is already a marketplace plugin (${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}).`);
+          }
+        }
         const entry: Record<string, string> = { repo: repoDisplay(parsed.repo) };
         if (folder !== "") entry.path = folder;
         if (parsed.ref) entry.ref = parsed.ref;
