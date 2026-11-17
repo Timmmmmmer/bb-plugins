@@ -1,10 +1,11 @@
 // bb-plugin-hub — the "Plugin hub" sidebar page.
-import { useCallback, useEffect, useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { PackageView, PluginFolder, rpcContract, Schedule, SyncReport, SyncResult } from "./server";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 function EmptyState({ children }: { children: ReactNode }) {
@@ -52,6 +53,122 @@ function ScheduleBanner({ schedule }: { schedule: Schedule }) {
 }
 
 const PROBLEM: SyncResult["outcome"][] = ["failed", "other-source"];
+
+// Same exclusions as the server: build output, dependencies, git data, secrets.
+const SKIPPED = new Set(["node_modules", "dist", ".git", ".claude"]);
+const isSkipped = (segment: string) => SKIPPED.has(segment) || segment === ".env" || segment.startsWith(".env.");
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+
+async function toBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+type AddInput = {
+  source?: string;
+  files?: { path: string; data: string }[];
+  archive?: { name: string; data: string };
+  name?: string;
+  subdir?: string;
+};
+type AddResult = { folder: string; pluginId: string; commit: string | null; warning: string | null; unchanged: boolean; guaranteedBy: string };
+
+function AddPluginCard({
+  busy,
+  onAdd,
+}: {
+  busy: string | null;
+  onAdd: (input: AddInput) => Promise<AddResult | null>;
+}) {
+  const [source, setSource] = useState("");
+  const [name, setName] = useState("");
+  const [subdir, setSubdir] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
+  const archiveInput = useRef<HTMLInputElement>(null);
+  const extra = () => ({ ...(name.trim() ? { name: name.trim() } : {}), ...(subdir.trim() ? { subdir: subdir.trim() } : {}) });
+
+  const submit = async (input: AddInput) => {
+    setMessage(null);
+    const result = await onAdd({ ...input, ...extra() });
+    if (result === null) return;
+    setSource("");
+    setMessage(
+      result.unchanged
+        ? `${result.folder} is unchanged.`
+        : `Added ${result.folder} (commit ${result.commit}). Every running hub has it by ${new Date(result.guaranteedBy).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.${result.warning ? ` Note: ${result.warning}` : ""}`,
+    );
+  };
+  const onFolder = async (event: ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    const kept = picked.filter((file) => !(file.webkitRelativePath || file.name).split("/").some(isSkipped));
+    const size = kept.reduce((total, file) => total + file.size, 0);
+    if (kept.length === 0) return setMessage("That folder has no files to upload.");
+    if (size > MAX_UPLOAD_BYTES) return setMessage(`That folder is ${Math.round(size / 1024 / 1024)} MB without node_modules/dist; the limit is 8 MB.`);
+    const files = await Promise.all(kept.map(async (file) => ({ path: file.webkitRelativePath || file.name, data: await toBase64(file) })));
+    await submit({ files });
+  };
+  const onArchive = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file === undefined) return;
+    if (file.size > MAX_UPLOAD_BYTES) return setMessage(`${file.name} is ${Math.round(file.size / 1024 / 1024)} MB; the limit is 8 MB.`);
+    await submit({ archive: { name: file.name, data: await toBase64(file) } });
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm">
+      <form
+        className="flex flex-wrap items-center gap-2"
+        onSubmit={(event: FormEvent<HTMLFormElement>) => {
+          event.preventDefault();
+          if (source.trim() !== "" && busy === null) void submit({ source: source.trim() });
+        }}
+      >
+        <Input
+          value={source}
+          onChange={(event) => setSource(event.target.value)}
+          placeholder="Git URL, .zip/.tar URL, or folder path on the bb machine"
+          aria-label="Plugin source"
+          className="min-w-64 flex-[3]"
+        />
+        <Button type="submit" disabled={busy !== null || source.trim() === ""}>
+          <Icon name="Plus" className="size-4" />
+          {busy === "add" ? "Adding…" : "Add"}
+        </Button>
+      </form>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="folder name (optional)" aria-label="Folder name" className="min-w-36 flex-1" />
+        <Input value={subdir} onChange={(event) => setSubdir(event.target.value)} placeholder="subfolder in source (optional)" aria-label="Subfolder" className="min-w-36 flex-1" />
+        <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => folderInput.current?.click()}>
+          <Icon name="FolderUp" className="size-4" />
+          Upload folder…
+        </Button>
+        <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => archiveInput.current?.click()}>
+          <Icon name="FileArchive" className="size-4" />
+          Upload .zip…
+        </Button>
+        <input
+          ref={folderInput}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(event) => void onFolder(event)}
+          {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+        />
+        <input ref={archiveInput} type="file" accept=".zip,.tar,.tgz,.gz,.bz2,.xz" className="hidden" onChange={(event) => void onArchive(event)} />
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        The plugin is copied into the shared repository (without node_modules, dist, .git, .env), committed, and pushed
+        with this machine's git login. Every hub installs it at the next sync.
+      </p>
+      {message === null ? null : <p className="mt-1 text-xs">{message}</p>}
+    </div>
+  );
+}
 
 function PackagesSection({ packages, lastSync }: { packages: PackageView[]; lastSync: SyncReport | null }) {
   const labels = packages.map((entry) => entry.label);
@@ -157,6 +274,17 @@ function HubPage() {
         {data === null ? null : (
           <>
             <ScheduleBanner schedule={data.schedule} />
+            <SectionTitle>Add a plugin</SectionTitle>
+            <AddPluginCard
+              busy={busy}
+              onAdd={async (input) => {
+                let added: AddResult | null = null;
+                await run("add", async () => {
+                  added = await rpc.call("hub_add_plugin", input);
+                });
+                return added;
+              }}
+            />
             <PackagesSection packages={data.packages} lastSync={data.lastSync} />
             <SectionTitle>Plugin folders in {data.repo}</SectionTitle>
             {data.folders.length === 0 ? (

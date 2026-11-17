@@ -16,7 +16,7 @@
 // packages.json), plus at startup, on settings changes, and on demand.
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, cp, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -47,6 +47,9 @@ const SELF_UPDATE_KEY = "selfUpdateAttempt";
 const SELF_UPDATE_GRACE_MS = 10 * 60_000;
 const SELF_UPDATE_DELAY_MS = 5_000;
 const HUB_CHANGED = "hub-changed";
+const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
+const MAX_PLUGIN_BYTES = 20 * 1024 * 1024;
+const MAX_UPLOAD_CHARS = 12 * 1024 * 1024; // base64 characters across all uploaded files
 
 function nextBoundary(fromMs: number, intervalMinutes: number): number {
   const step = intervalMinutes * 60_000;
@@ -165,6 +168,34 @@ export const rpcContract = defineRpcContract({
   hub_sync: {
     input: z.null(),
     output: syncReportSchema,
+  },
+  hub_add_plugin: {
+    input: z
+      .object({
+        source: z.string().trim().min(1).max(2000).optional(),
+        files: z.array(z.object({ path: z.string().min(1).max(500), data: z.string() })).max(5000).optional(),
+        archive: z.object({ name: z.string().min(1).max(200), data: z.string() }).optional(),
+        name: z.string().trim().max(64).optional(),
+        subdir: z.string().trim().max(200).optional(),
+        force: z.boolean().optional(),
+      })
+      .refine((input) => [input.source, input.files, input.archive].filter((value) => value !== undefined).length === 1, {
+        message: "give exactly one of source, files, or archive",
+      })
+      .refine(
+        (input) =>
+          (input.files ?? []).reduce((total, file) => total + file.data.length, 0) + (input.archive?.data.length ?? 0) <= MAX_UPLOAD_CHARS,
+        { message: "the upload is too large (about 8 MB at most; leave out node_modules and dist)" },
+      ),
+    output: z.object({
+      folder: z.string(),
+      pluginId: z.string(),
+      commit: z.string().nullable(),
+      warning: z.string().nullable(),
+      unchanged: z.boolean(),
+      guaranteedBy: z.string(),
+      sync: syncResultSchema.nullable(),
+    }),
   },
 });
 
@@ -698,6 +729,280 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // -------------------------------------------------------------------------
+  // Adding a plugin: from a git repository, an archive, a local folder, or an
+  // upload from the Plugin hub page. The plugin is copied into a working
+  // clone of the packages repository, checked, committed, and pushed with
+  // this machine's own git credentials (the hub stores none). Every running
+  // hub then installs it at the next sync, since packages.json includes
+  // plugins/*.
+
+  const ARCHIVE_PATTERN = /\.(zip|tar|tgz|tar\.gz|tar\.bz2|tar\.xz)$/iu;
+  const SKIP_NAMES = new Set(["node_modules", "dist", ".git", ".claude"]);
+  const isSkippedName = (name: string) => SKIP_NAMES.has(name) || name === ".env" || name.startsWith(".env.");
+  const FOLDER_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
+
+  /** git using this machine's own credentials (only for pushing). */
+  function gitWithMachineCredentials(args: string[], cwd: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      execFile("git", args, { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeout: GIT_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+        if (error) reject(new Error(String(stderr).trim().split("\n").slice(-2).join(" ") || error.message));
+        else resolve(String(stdout));
+      });
+    });
+  }
+
+  async function scratchDir(): Promise<string> {
+    const root = path.join(path.dirname(await ensureMirrorRoot()), "tmp");
+    await mkdir(root, { recursive: true });
+    return mkdtemp(path.join(root, "add-"));
+  }
+
+  async function extractArchive(file: string, into: string): Promise<string> {
+    await mkdir(into, { recursive: true });
+    const run = (command: string, args: string[]) =>
+      new Promise<void>((resolve, reject) =>
+        execFile(command, args, { timeout: GIT_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, (error, _out, stderr) =>
+          error ? reject(new Error(`${command} failed: ${String(stderr).trim() || error.message}`)) : resolve(),
+        ),
+      );
+    // unzip and tar both refuse absolute and "../" entries.
+    if (/\.zip$/iu.test(file)) await run("unzip", ["-q", file, "-d", into]);
+    else await run("tar", ["-xf", file, "-C", into]);
+    // Archives often wrap everything in one top-level folder.
+    const entries = await readdir(into, { withFileTypes: true });
+    return entries.length === 1 && entries[0]?.isDirectory() ? path.join(into, entries[0].name) : into;
+  }
+
+  type UploadedFile = { path: string; data: string };
+  type AddSource =
+    | { kind: "text"; source: string; cwd?: string }
+    | { kind: "files"; files: UploadedFile[] }
+    | { kind: "archive"; name: string; data: string };
+
+  /** Put the source in a scratch folder; returns that folder and a description. */
+  async function materialize(source: AddSource, scratch: string): Promise<{ dir: string; description: string }> {
+    if (source.kind === "files") {
+      const root = path.join(scratch, "upload");
+      for (const file of source.files) {
+        const parts = file.path.replace(/\\/gu, "/").split("/").filter((part) => part !== "" && part !== ".");
+        if (parts.length === 0 || parts.some((part) => part === ".." || isSkippedName(part))) continue;
+        const target = path.join(root, ...parts);
+        if (path.relative(root, target).startsWith("..")) continue;
+        await mkdir(path.dirname(target), { recursive: true });
+        await writeFile(target, Buffer.from(file.data, "base64"));
+      }
+      const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+      const dir = entries.length === 1 && entries[0]?.isDirectory() ? path.join(root, entries[0].name) : root;
+      return { dir, description: `uploaded folder ${path.basename(dir)}` };
+    }
+    if (source.kind === "archive") {
+      if (!ARCHIVE_PATTERN.test(source.name)) throw new Error(`"${source.name}" is not a .zip or .tar archive.`);
+      const file = path.join(scratch, `upload-${path.basename(source.name)}`);
+      await writeFile(file, Buffer.from(source.data, "base64"));
+      return { dir: await extractArchive(file, path.join(scratch, "extract")), description: `uploaded ${path.basename(source.name)}` };
+    }
+    const text = source.source.trim();
+    if (ARCHIVE_PATTERN.test(text.split(/[?#]/u)[0] ?? "")) {
+      const name = path.basename(text.split(/[?#]/u)[0] ?? "archive.zip");
+      const file = path.join(scratch, `download-${name}`);
+      if (/^https?:\/\//iu.test(text)) {
+        const response = await fetch(text, { signal: AbortSignal.timeout(60_000) });
+        if (!response.ok) throw new Error(`Downloading ${text} failed: ${response.status} ${response.statusText}.`);
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.length > MAX_DOWNLOAD_BYTES) throw new Error(`${text} is larger than ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB.`);
+        await writeFile(file, bytes);
+      } else {
+        await cp(path.resolve(source.cwd ?? process.cwd(), text), file);
+      }
+      return { dir: await extractArchive(file, path.join(scratch, "extract")), description: `archive ${name}` };
+    }
+    if (/^(https?:\/\/|git@|ssh:\/\/)/iu.test(text) || text.endsWith(".git")) {
+      const dir = path.join(scratch, "repo");
+      await git(["clone", "--quiet", "--depth", "1", text, dir]).catch((cause) => {
+        throw new Error(`Could not clone ${text} (${errorMessage(cause)}). Only public repositories work.`);
+      });
+      const commit = (await git(["rev-parse", "--short", "HEAD"], dir)).trim();
+      return { dir, description: `${text}@${commit}` };
+    }
+    const dir = path.resolve(source.cwd ?? process.cwd(), text);
+    const info = await stat(dir).catch(() => null);
+    if (info === null || !info.isDirectory()) {
+      throw new Error(`"${text}" is not a folder, git URL, or .zip/.tar archive on the machine running bb.`);
+    }
+    return { dir, description: `folder ${path.basename(dir)}` };
+  }
+
+  async function isPluginDir(dir: string): Promise<boolean> {
+    try {
+      const manifest = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8")) as { bb?: unknown };
+      return typeof manifest.bb === "object" && manifest.bb !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The plugin folder in the source: `subdir`, the root, or the only plugin within 4 levels. */
+  async function findPluginDir(base: string, subdir: string | undefined): Promise<string> {
+    let root = base;
+    if (subdir !== undefined && subdir.trim() !== "") {
+      if (!PATH_PATTERN.test(subdir.trim())) throw new Error(`Invalid subdir "${subdir}".`);
+      root = path.join(base, subdir.trim());
+    }
+    if (await isPluginDir(root)) return root;
+    const found: string[] = [];
+    const walk = async (dir: string, depth: number) => {
+      if (depth > 4 || found.length > 20) return;
+      for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+        if (!entry.isDirectory() || isSkippedName(entry.name)) continue;
+        const child = path.join(dir, entry.name);
+        if (await isPluginDir(child)) found.push(child);
+        else await walk(child, depth + 1);
+      }
+    };
+    await walk(root, 1);
+    if (found.length === 0) throw new Error('No bb plugin found (a package.json with a "bb" section).');
+    if (found.length > 1) {
+      throw new Error(`The source holds several plugins; pick one with subdir: ${found.map((dir) => path.relative(base, dir)).join(", ")}`);
+    }
+    return found[0] as string;
+  }
+
+  /** Validate the manifest; returns the plugin id and a warning, if any. */
+  async function checkManifest(dir: string): Promise<{ pluginId: string; warning: string | null }> {
+    const manifest = z
+      .object({
+        name: z.string().min(1),
+        engines: z.object({ bb: z.string().optional() }).passthrough().optional(),
+        bb: z.object({
+          name: z.string().min(1),
+          description: z.string().min(1),
+          server: z.string().min(1),
+          branding: z.object({ icon: z.string().optional(), logo: z.unknown().optional() }).passthrough(),
+        }).passthrough(),
+      })
+      .passthrough()
+      .safeParse(JSON.parse(await readFile(path.join(dir, "package.json"), "utf8")));
+    if (!manifest.success) {
+      throw new Error(`Not a valid bb plugin: ${manifest.error.issues.map((issue) => `${issue.path.join(".")} ${issue.message}`).join("; ")}`);
+    }
+    if (!manifest.data.bb.branding.icon && !manifest.data.bb.branding.logo) throw new Error("Not a valid bb plugin: bb.branding.icon is missing.");
+    const server = path.resolve(dir, manifest.data.bb.server);
+    if (path.relative(dir, server).startsWith("..") || !(await stat(server).then((s) => s.isFile(), () => false))) {
+      throw new Error(`Not a valid bb plugin: bb.server file ${manifest.data.bb.server} does not exist.`);
+    }
+    const pluginId = pluginIdForPackageName(manifest.data.name);
+    if (pluginId === "") throw new Error("Not a valid bb plugin: invalid package name.");
+    const min = manifest.data.engines?.bb?.match(/(\d+)\.(\d+)(?:\.(\d+))?/u);
+    let warning: string | null = null;
+    if (min) {
+      const [major, minor, patch] = [Number(min[1]), Number(min[2]), Number(min[3] ?? 0)];
+      if (major > 0 || minor > 47 || (minor === 47 && patch > 1)) {
+        warning = `engines.bb is "${manifest.data.engines?.bb}"; machines on older bb (e.g. 0.47.1) will refuse it. Lower it if the plugin doesn't need it.`;
+      }
+    }
+    return { pluginId, warning };
+  }
+
+  /** Copy a plugin folder, leaving out build output, secrets, and symlinks. */
+  async function copyPlugin(from: string, to: string): Promise<number> {
+    let bytes = 0;
+    await cp(from, to, {
+      recursive: true,
+      filter: async (source) => {
+        if (source !== from && isSkippedName(path.basename(source))) return false;
+        const info = await lstat(source);
+        if (info.isSymbolicLink()) return false;
+        if (info.isFile()) bytes += info.size;
+        return true;
+      },
+    });
+    if (bytes > MAX_PLUGIN_BYTES) throw new Error(`The plugin is ${Math.round(bytes / 1024 / 1024)} MB; the limit is ${MAX_PLUGIN_BYTES / 1024 / 1024} MB.`);
+    return bytes;
+  }
+
+  /** A working (non-bare) clone of the packages repository, reset to GitHub's latest. */
+  async function workingClone(repo: RepoRef): Promise<string> {
+    const dir = path.join(path.dirname(await ensureMirrorRoot()), "work", repo.owner.toLowerCase(), repo.name.toLowerCase());
+    if (await access(path.join(dir, ".git")).then(() => true, () => false)) {
+      await git(["fetch", "--quiet", "origin"], dir);
+      await git(["reset", "--quiet", "--hard", "origin/HEAD"], dir);
+      await git(["clean", "-fdxq"], dir);
+    } else {
+      await rm(dir, { recursive: true, force: true });
+      await mkdir(path.dirname(dir), { recursive: true });
+      await git(["clone", "--quiet", repoUrl(repo), dir]);
+    }
+    return dir;
+  }
+
+  async function addPlugin(
+    source: AddSource,
+    options: { name?: string; subdir?: string; force?: boolean },
+  ) {
+    const result = await serialize(async () => {
+      const { packagesRepo, hubPath } = await readConfig();
+      const scratch = await scratchDir();
+      try {
+        const { dir: base, description } = await materialize(source, scratch);
+        const pluginDir = await findPluginDir(base, options.subdir);
+        const { pluginId, warning } = await checkManifest(pluginDir);
+        const folderName = (options.name?.trim() || pluginId).toLowerCase();
+        if (!FOLDER_NAME_PATTERN.test(folderName)) throw new Error(`Folder name "${folderName}" must use lowercase letters, digits, ".", "_", "-".`);
+        const folder = `${PLUGINS_FOLDER}/${folderName}`;
+        if (folder === hubPath || pluginId === bb.pluginId) throw new Error("That is the hub itself; push changes to it directly.");
+
+        const work = await workingClone(packagesRepo);
+        const dest = path.join(work, PLUGINS_FOLDER, folderName);
+        // bb installs one plugin per id, so two folders can't share one.
+        for (const entry of await readdir(path.join(work, PLUGINS_FOLDER), { withFileTypes: true }).catch(() => [])) {
+          if (!entry.isDirectory() || entry.name === folderName) continue;
+          const other = await readFile(path.join(work, PLUGINS_FOLDER, entry.name, "package.json"), "utf8")
+            .then((text) => pluginIdForPackageName((JSON.parse(text) as { name?: string }).name ?? ""), () => null);
+          if (other === pluginId) throw new Error(`Plugin id "${pluginId}" is already used by ${PLUGINS_FOLDER}/${entry.name}.`);
+        }
+        if (await access(dest).then(() => true, () => false)) {
+          if (!options.force) throw new Error(`${folder} already exists (use force to replace it).`);
+          await rm(dest, { recursive: true, force: true });
+        }
+        await copyPlugin(pluginDir, dest);
+        if (!(await access(path.join(dest, ".gitignore")).then(() => true, () => false))) {
+          await writeFile(path.join(dest, ".gitignore"), "node_modules/\ndist/\n");
+        }
+        await git(["add", "-A", "--", folder], work);
+        const staged = await git(["diff", "--cached", "--name-only", "--", folder], work);
+        if (staged.trim() === "") return { folder, pluginId, commit: null, warning, unchanged: true };
+        const identity = (await gitWithMachineCredentials(["config", "user.name"], work).catch(() => "")).trim()
+          ? []
+          : ["-c", "user.name=bb hub", "-c", "user.email=bb-hub@users.noreply.github.com"];
+        await git([...identity, "commit", "--quiet", "-m", `Add plugin ${folderName} (from ${description})`, "--", folder], work);
+        try {
+          await gitWithMachineCredentials(["push", "--quiet", "origin", "HEAD"], work);
+        } catch (first) {
+          // Someone pushed meanwhile: rebase once and retry.
+          await gitWithMachineCredentials(["pull", "--quiet", "--rebase", "origin", "HEAD"], work).catch(() => {
+            throw first;
+          });
+          await gitWithMachineCredentials(["push", "--quiet", "origin", "HEAD"], work).catch((cause) => {
+            throw new Error(
+              `Pushing to ${packagesRepo.owner}/${packagesRepo.name} failed: ${errorMessage(cause)}. Adding plugins needs this machine's git to have write access to the repository (for example \`gh auth setup-git\`).`,
+            );
+          });
+        }
+        const commit = (await git(["rev-parse", "--short", "HEAD"], work)).trim();
+        bb.log.info(`added ${folder} (${pluginId}) from ${description} as ${commit}`);
+        return { folder, pluginId, commit, warning, unchanged: false };
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
+    });
+    // Install it here right away; other hubs follow at the next shared sync.
+    const report = await requestSync("plugin added");
+    const sync = report.results.find((entry) => entry.pluginId === result.pluginId) ?? null;
+    bb.realtime.publish(HUB_CHANGED, { added: result.folder });
+    return { ...result, guaranteedBy: scheduleView(null).guaranteedBy, sync };
+  }
+
+  // -------------------------------------------------------------------------
   // Triggers
 
   settings.onChange((next, prev) => {
@@ -764,6 +1069,16 @@ export default async function plugin(bb: BbPluginApi) {
     hub_sync: (_input, context) => {
       clientOnly(context, "hub_sync");
       return requestSync("manual");
+    },
+    hub_add_plugin: (input, context) => {
+      clientOnly(context, "hub_add_plugin");
+      const source: AddSource =
+        input.files !== undefined
+          ? { kind: "files", files: input.files }
+          : input.archive !== undefined
+            ? { kind: "archive", name: input.archive.name, data: input.archive.data }
+            : { kind: "text", source: input.source ?? "" };
+      return addPlugin(source, { name: input.name, subdir: input.subdir, force: input.force });
     },
   });
 
@@ -847,6 +1162,38 @@ export default async function plugin(bb: BbPluginApi) {
             return {
               exitCode: report.results.some((result) => result.outcome === "failed") ? 1 : 0,
               stdout: options.json ? JSON.stringify(report) : [`Packages from ${report.packagesFrom}`, ...report.results.map(formatResult)].join("\n"),
+            };
+          },
+        }),
+        "plugin add": cliCommand({
+          summary: "Add a plugin to the shared repository from a git repo, a local folder, or a .zip/.tar (file or URL); commits, pushes, and installs it",
+          description:
+            "Pushes with the git credentials of the machine running bb (the hub stores none). Local paths are on that machine. Every running hub installs the plugin at the next shared sync.",
+          positionals: [
+            { name: "source", description: "Git URL, folder path, or .zip/.tar(.gz) file or URL", required: true },
+          ],
+          options: {
+            name: { type: "string", placeholder: "folder", description: "Folder name under plugins/ (default: the plugin id)" },
+            subdir: { type: "string", placeholder: "path", description: "The plugin's folder inside the source, when it holds several" },
+            force: { type: "boolean", description: "Replace plugins/<folder> if it already exists" },
+            ...jsonOption,
+          },
+          async run({ positionals, options }, ctx) {
+            const added = await addPlugin(
+              { kind: "text", source: positionals.source, cwd: ctx.cwd },
+              { name: options.name, subdir: options.subdir, force: options.force },
+            ).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(added) };
+            return {
+              exitCode: added.sync?.outcome === "failed" ? 1 : 0,
+              stdout: [
+                added.unchanged
+                  ? `${added.folder} is unchanged; nothing to commit.`
+                  : `Added ${added.folder} (plugin id ${added.pluginId}) and pushed commit ${added.commit}.`,
+                ...(added.warning ? [`Note: ${added.warning}`] : []),
+                ...(added.sync ? [`This machine: ${formatResult(added.sync)}`] : []),
+                `Every running hub has it by ${formatTime(added.guaranteedBy)}; hubs that are off get it when they start.`,
+              ].join("\n"),
             };
           },
         }),

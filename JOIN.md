@@ -60,10 +60,18 @@ starts.
 
 ## Maintainers
 
-- **Add a plugin:** add its folder under `plugins/`. Upload it on GitHub
-  (**Add file → Upload files**), or run `scripts/add-plugin.sh <folder | git URL | .zip>`,
-  which copies, checks, commits, and pushes. Every running hub installs it at
-  the next sync.
+- **Add a plugin:** add its folder under `plugins/`, in any of these ways:
+  - `bb hub plugin add <git URL | folder | .zip/.tar file or URL>` (options
+    `--name`, `--subdir`, `--force`);
+  - the **Add a plugin** card on the Plugin hub page: paste a source, or
+    upload a folder or a `.zip` (up to 8 MB);
+  - `scripts/add-plugin.sh <source>` from a clone of this repository;
+  - GitHub's **Add file → Upload files**.
+
+  The first two copy the plugin in (without `node_modules`, `dist`, `.git`,
+  `.env`), check it, commit, and push with the git login of the machine
+  running bb (run `gh auth setup-git` there if pushing fails). Every running
+  hub installs it at the next sync.
 - **Stop installing one:** delete its folder, or add it to `exclude` in
   `packages.json`, and push. Machines keep the plugin installed but stop
   updating it.

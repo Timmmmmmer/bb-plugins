@@ -18,7 +18,19 @@ bb hub packages [--json]    # what packages.json lists
 bb hub list [--json]        # every plugin folder in the repo, installed or not
 bb hub install <folder>     # e.g. bb hub install hello (or plugins/hello); updates if installed
 bb hub adopt <folder>       # switch a plugin installed elsewhere; DELETES its settings and data, so confirm first
+bb hub plugin add <source> [--name <folder>] [--subdir <path>] [--force] [--json]
+                            # add a plugin to the shared repo from a git URL, a folder, or a .zip/.tar file or URL
 ```
+
+`bb hub plugin add` (and the page's **Add a plugin** card, which also accepts
+an uploaded folder or `.zip` up to 8 MB) copies the plugin into
+`plugins/<folder>`, leaving out node_modules, dist, .git, .claude, .env files,
+and symlinks. It checks the manifest (`name`, `bb.name`, `bb.description`,
+`bb.server`, `bb.branding`) and refuses a plugin id another folder already
+uses. Then it commits and pushes **with the git credentials of the machine
+running bb** (the hub stores none), and syncs. It publishes to a public
+repository and changes what every member installs, so confirm with the user
+before running it. Local paths and archives are read on the machine running bb.
 
 ## packages.json
 
@@ -46,8 +58,7 @@ clone of the repository. The source can be a local folder, a git URL, or a
 folder, and `--no-push` commits without pushing. The script copies without
 `node_modules`/`dist`/`.git`/`.env`, validates the manifest, refuses duplicate
 plugin ids, then commits and pushes. Uploading the folder on GitHub works too.
-The hub has no command to add plugins, because pushing needs the
-maintainer's own git access.
+`bb hub plugin add` does the same from bb.
 
 ## Sync behaviour
 

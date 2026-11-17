@@ -13,8 +13,11 @@ The repository is public, so nothing needs a GitHub token.
 
 - **Join:** see [JOIN.md](JOIN.md). It's one command.
 - **Add a plugin:** put its folder in `plugins/<name>/`. That's it: every
-  folder there that holds a bb plugin is installed on every hub. Either way
+  folder there that holds a bb plugin is installed on every hub. Any of these
   works:
+  - **From bb:** `bb hub plugin add <git URL | folder | .zip/.tar file or URL>`,
+    or the **Add a plugin** card on the Plugin hub page (paste a source, or
+    upload a folder or `.zip`). It pushes with the bb machine's own git login.
   - **In the browser:** on GitHub, open `plugins/`, choose **Add file → Upload
     files**, and drag in the plugin's folder (without `node_modules`).
   - **From any source** (local folder, git repository, or `.zip`/`.tar.gz`):
