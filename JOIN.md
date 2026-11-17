@@ -82,9 +82,14 @@ starts.
   automatically on machines that don't have it. `bb hub marketplace remove <id>`
   takes it off the list (it stays installed).
 - **Stop installing one:** for a remote plugin, `bb hub plugin remove <repo>`
-  (or ✕ on the page). For a local plugin, delete its folder (or add it to
-  `exclude` in `packages.json`) and push. Machines keep the plugin installed
-  but stop updating it.
+  (or ✕ on the page); machines keep it installed but stop updating it.
+- **Delete a local plugin:** the 🗑 button on the page (it asks to confirm),
+  or `bb hub plugin delete <folder> --yes`. This removes the folder from the
+  repository and puts its id on `packages.json`'s `uninstall` list, so **every
+  hub uninstalls it, and its data and settings are lost on every machine**.
+  Adding a plugin with that id again takes it off the list. (Only deleting
+  the folder by hand on GitHub, or adding it to `exclude`, leaves it installed
+  but no longer updated.)
 - Every plugin needs a distinct plugin id (the `name` in its `package.json`).
   Adding a duplicate is refused, and the hub reports a second one as `failed`.
 - **Ship an update:** push to the plugin: its folder here, or its own

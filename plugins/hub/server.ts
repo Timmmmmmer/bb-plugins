@@ -73,6 +73,11 @@ const packagesFileSchema = z.object({
   include: z.array(z.string().trim().min(1)).max(20).optional(),
   /** Folders to leave out of `include`, e.g. "plugins/experimental". */
   exclude: z.array(z.string().trim().min(1)).max(200).optional(),
+  /**
+   * Plugin ids every hub uninstalls (deleting their data). Filled when a local
+   * plugin is deleted; an id leaves the list when a plugin with it is added again.
+   */
+  uninstall: z.array(z.string().trim().min(1)).max(200).optional(),
   /** Older name for "remote"; still read. */
   plugins: z.array(packageEntrySchema).max(100).optional(),
   /** Remote plugins: other public repositories, installed straight from there. */
@@ -188,7 +193,7 @@ const errorMessage = (cause: unknown) => (cause instanceof Error ? cause.message
 const syncResultSchema = z.object({
   repo: z.string(),
   pluginId: z.string().nullable(),
-  outcome: z.enum(["installed", "updated", "current", "pinned", "skipped", "other-source", "updating", "failed"]),
+  outcome: z.enum(["installed", "updated", "current", "pinned", "skipped", "other-source", "updating", "removed", "failed"]),
   detail: z.string().nullable(),
   version: z.string().nullable(),
 });
@@ -347,6 +352,10 @@ export const rpcContract = defineRpcContract({
       guaranteedBy: z.string(),
       sync: syncResultSchema.nullable(),
     }),
+  },
+  hub_local_delete: {
+    input: z.object({ path: z.string().trim().min(1).max(200) }),
+    output: z.object({ folder: z.string(), pluginId: z.string(), commit: z.string().nullable(), removedHere: z.boolean(), guaranteedBy: z.string() }),
   },
   hub_remote_remove: {
     input: z.object({ repo: z.string().trim().min(1).max(500), path: z.string().trim().max(200).optional() }),
@@ -590,7 +599,8 @@ export default async function plugin(bb: BbPluginApi) {
       }
       marketplace.push({ id: entry.id, marketplace: entry.marketplace ?? null, source: entry.source ?? null, subdirectory: entry.subdirectory ?? null });
     }
-    return { from: `${repoDisplay(packagesRepo)}/packages.json`, packagesRepo, specs, marketplace, errors };
+    const uninstall = [...new Set((file.uninstall ?? []).map((id) => id.toLowerCase()).filter((id) => ENTRY_ID_PATTERN.test(id)))];
+    return { from: `${repoDisplay(packagesRepo)}/packages.json`, packagesRepo, specs, marketplace, uninstall, errors };
   }
 
   const isLocal = (spec: PackageSpec, packagesRepo: RepoRef) => repoKey(spec) === repoKey(packagesRepo);
@@ -808,6 +818,51 @@ export default async function plugin(bb: BbPluginApi) {
     return commitAndPush(work, ["packages.json"], message, packagesRepo);
   }
 
+  /** packages.json with `pluginId` taken off the uninstall list (it's wanted again). */
+  const withoutUninstall = (document: Record<string, unknown>, pluginId: string): Record<string, unknown> => {
+    if (!Array.isArray(document.uninstall)) return document;
+    return { ...document, uninstall: (document.uninstall as unknown[]).filter((id) => String(id).toLowerCase() !== pluginId.toLowerCase()) };
+  };
+
+  /**
+   * Delete a local plugin: remove its folder from the shared repository and
+   * put its id on the uninstall list, so every hub uninstalls it (deleting
+   * its data) at the next sync. This machine uninstalls it right away.
+   */
+  async function deleteLocalPlugin(arg: string) {
+    const outcome = await serialize(async () => {
+      const { packagesRepo, hubPath } = await readConfig();
+      const folder = (arg.includes("/") ? arg : `${PLUGINS_FOLDER}/${arg}`).replace(/^\/+|\/+$/gu, "");
+      if (!folder.startsWith(`${PLUGINS_FOLDER}/`) || folder.split("/").length !== 2 || !PATH_PATTERN.test(folder)) {
+        throw new Error(`"${arg}" is not a local plugin folder (expected plugins/<name>).`);
+      }
+      if (folder === hubPath) throw new Error("The hub can't delete itself.");
+      const work = await workingClone(packagesRepo);
+      const manifestText = await readFile(path.join(work, folder, "package.json"), "utf8").catch(() => null);
+      if (manifestText === null) throw new Error(`${folder} doesn't exist in the shared repository.`);
+      const pluginId = pluginIdForPackageName(packageJsonSchema.parse(JSON.parse(manifestText)).name);
+      await rm(path.join(work, folder), { recursive: true, force: true });
+      const file = path.join(work, "packages.json");
+      const document = z.record(z.string(), z.unknown()).parse(JSON.parse(await readFile(file, "utf8")));
+      const uninstall = z.array(z.string()).catch([]).parse(document.uninstall ?? []);
+      const exclude = z.array(z.string()).catch([]).parse(document.exclude ?? []);
+      const next = {
+        ...document,
+        ...(document.exclude !== undefined ? { exclude: exclude.filter((entry) => entry.replace(/\/+$/u, "") !== folder) } : {}),
+        uninstall: [...new Set([...uninstall, pluginId])],
+      };
+      packagesFileSchema.parse(next);
+      await writeFile(file, `${JSON.stringify(next, null, 2)}\n`);
+      const commit = await commitAndPush(work, [folder, "packages.json"], `Delete local plugin ${folder} (${pluginId}) and uninstall it everywhere`, packagesRepo);
+      bb.log.info(`deleted ${folder} (${pluginId}) as ${commit ?? "?"}`);
+      return { folder, pluginId, commit };
+    });
+    const report = await requestSync("plugin deleted");
+    const removedHere = report.results.some((result) => result.pluginId === outcome.pluginId && result.outcome === "removed");
+    bb.realtime.publish(HUB_CHANGED, { deleted: outcome.folder });
+    return { ...outcome, removedHere, guaranteedBy: scheduleView(null).guaranteedBy };
+  }
+
   async function addMarketplacePlugin(arg: string) {
     const wanted = parseEntryArg(arg);
     const outcome = await serialize(async () => {
@@ -831,7 +886,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (list.some((item) => item.id === entry.id && (item.marketplace ?? marketplace) === marketplace)) {
           throw new Error(`${entry.id}@${marketplace} is already in packages.json.`);
         }
-        return { ...document, marketplace: [...list, entry] };
+        return { ...withoutUninstall(document, plan.pluginId), marketplace: [...list, entry] };
       }, `Add ${entry.id}@${marketplace} from the marketplace to hub packages`);
       return { entry: `${entry.id}@${marketplace}`, pluginId: plan.pluginId, displayName: plan.displayName, commit, compatible: plan.compatible, incompatibleReason: plan.incompatibleReason };
     });
@@ -911,6 +966,26 @@ export default async function plugin(bb: BbPluginApi) {
           results.push(await syncMarketplaceEntry(entry));
         } catch (cause) {
           results.push({ repo: marketplaceLabel(entry), pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null });
+        }
+      }
+      // Deleted local plugins: uninstall them (this deletes their data), but
+      // only when this hub installed them from the shared repository, and
+      // never while a package with that id is still listed.
+      const listedIds = new Set([...folderForId.keys(), ...results.map((result) => result.pluginId).filter((id): id is string => id !== null)]);
+      const installedNow = (await bb.sdk.plugins.list()).plugins;
+      const sharedSource = `git:${repoUrl(packages.packagesRepo)}`.toLowerCase();
+      for (const id of packages.uninstall) {
+        if (id === bb.pluginId || listedIds.has(id)) continue;
+        const plugin = installedNow.find((entry) => entry.id === id);
+        if (plugin === undefined) continue;
+        const source = plugin.source.toLowerCase();
+        if (source !== sharedSource && !source.startsWith(`${sharedSource}@`)) continue;
+        try {
+          await bb.sdk.plugins.remove({ pluginId: id });
+          bb.log.info(`uninstalled ${id}: it was deleted from the shared repository`);
+          results.push({ repo: `deleted:${id}`, pluginId: id, outcome: "removed", detail: "deleted from the shared repository; uninstalled with its data", version: plugin.version });
+        } catch (cause) {
+          results.push({ repo: `deleted:${id}`, pluginId: id, outcome: "failed", detail: `could not uninstall: ${errorMessage(cause)}`, version: plugin.version });
         }
       }
     } catch (cause) {
@@ -1399,7 +1474,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (parsed.ref) entry.ref = parsed.ref;
         const commit = await editPackagesJson((document) => {
           const list = z.array(z.record(z.string(), z.unknown())).catch([]).parse(document.remote ?? []);
-          return { ...document, remote: [...list, entry] };
+          return { ...withoutUninstall(document, pluginId), remote: [...list, entry] };
         }, `Add remote plugin ${label}`);
         bb.log.info(`added remote plugin ${label} (${pluginId}) as ${commit ?? "?"}`);
         return { folder: label, pluginId, commit, warning, unchanged: false, kind: "remote" as const };
@@ -1478,7 +1553,11 @@ export default async function plugin(bb: BbPluginApi) {
         if (!(await access(path.join(dest, ".gitignore")).then(() => true, () => false))) {
           await writeFile(path.join(dest, ".gitignore"), "node_modules/\ndist/\n");
         }
-        const commit = await commitAndPush(work, [folder], `Add plugin ${folderName} (from ${description})`, packagesRepo);
+        const packagesFile = path.join(work, "packages.json");
+        const packagesDoc = z.record(z.string(), z.unknown()).parse(JSON.parse(await readFile(packagesFile, "utf8")));
+        const cleaned = withoutUninstall(packagesDoc, pluginId);
+        if (cleaned !== packagesDoc) await writeFile(packagesFile, `${JSON.stringify(cleaned, null, 2)}\n`);
+        const commit = await commitAndPush(work, [folder, "packages.json"], `Add plugin ${folderName} (from ${description})`, packagesRepo);
         if (commit === null) return { folder, pluginId, commit: null, warning, unchanged: true, kind: "local" as const };
         bb.log.info(`added ${folder} (${pluginId}) from ${description} as ${commit}`);
         return { folder, pluginId, commit, warning, unchanged: false, kind: "local" as const };
@@ -1575,6 +1654,10 @@ export default async function plugin(bb: BbPluginApi) {
     hub_marketplace_remove: ({ entry }, context) => {
       clientOnly(context, "hub_marketplace_remove");
       return removeMarketplacePlugin(entry);
+    },
+    hub_local_delete: ({ path: folder }, context) => {
+      clientOnly(context, "hub_local_delete");
+      return deleteLocalPlugin(folder);
     },
     hub_remote_remove: ({ repo, path: folder }, context) => {
       clientOnly(context, "hub_remote_remove");
@@ -1758,6 +1841,31 @@ export default async function plugin(bb: BbPluginApi) {
                 `Removed ${removed.removed.join(", ")} from packages.json${removed.commit ? ` (commit ${removed.commit})` : ""}.`,
                 "Machines keep it installed but stop updating it; uninstall it with `bb plugin remove <id>` where it's no longer wanted.",
                 `Every running hub stops managing it by ${formatTime(removed.guaranteedBy)}.`,
+              ].join("\n"),
+            };
+          },
+        }),
+        "plugin delete": cliCommand({
+          summary: "Delete a local plugin from the shared repository and uninstall it on every hub (its data is lost everywhere)",
+          positionals: [{ name: "folder", description: 'The local plugin: "hello" or "plugins/hello"', required: true }],
+          options: {
+            yes: { type: "boolean", description: "Confirm: every member loses this plugin and all its data and settings" },
+            ...jsonOption,
+          },
+          async run({ positionals, options }) {
+            if (!options.yes) {
+              throw new PluginCliError(
+                `Deleting ${positionals.folder} removes it from the shared repository and uninstalls it from every member's bb at the next sync. All of its data and settings will be lost on every machine. Re-run with --yes to confirm.`,
+              );
+            }
+            const deleted = await deleteLocalPlugin(positionals.folder).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(deleted) };
+            return {
+              exitCode: 0,
+              stdout: [
+                `Deleted ${deleted.folder} (plugin id ${deleted.pluginId})${deleted.commit ? ` in commit ${deleted.commit}` : ""}.`,
+                deleted.removedHere ? "Uninstalled on this machine." : "It wasn't installed from the shared repository on this machine.",
+                `Every running hub uninstalls it by ${formatTime(deleted.guaranteedBy)}.`,
               ].join("\n"),
             };
           },

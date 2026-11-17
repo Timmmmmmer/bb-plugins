@@ -9,6 +9,7 @@ import type { PackageView, PluginFolder, rpcContract, Schedule, SyncReport, Sync
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 type Rpc = ReturnType<typeof useRpc<typeof rpcContract>>;
@@ -167,6 +168,7 @@ function Empty({ children }: { children: ReactNode }) {
 /** Local (folders in the shared repo) and remote (other public repos) plugins, in one list. */
 function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
   const nameFor = (entry: PackageView) => entry.info?.name ?? entry.label;
+  const [confirm, setConfirm] = useState<PackageView | null>(null);
   const resultFor = (label: string) => data.lastSync?.results.find((result) => result.repo === label) ?? null;
   return (
     <>
@@ -203,13 +205,50 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
                     <Icon name="X" className="size-3.5" />
                   </Button>
                 ) : (
-                  <span className="size-6 shrink-0" />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6 text-muted-foreground hover:text-destructive"
+                    aria-label={`Delete ${nameFor(entry)}`}
+                    disabled={busy !== null}
+                    onClick={() => setConfirm(entry)}
+                  >
+                    <Icon name="Trash2" className="size-3.5" />
+                  </Button>
                 )
               }
             />
           ))}
         </List>
       )}
+      <Dialog open={confirm !== null} onOpenChange={(open) => (open ? null : setConfirm(null))}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {confirm === null ? "" : nameFor(confirm)}?</DialogTitle>
+            <DialogDescription>
+              This removes <code>{confirm?.path}</code> from the shared repository and uninstalls it from every member's
+              bb at the next sync. <strong>All of the plugin's data and settings will be lost on every machine.</strong>{" "}
+              This can't be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirm(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={busy !== null}
+              onClick={() => {
+                const entry = confirm;
+                setConfirm(null);
+                if (entry !== null) void run(`ldelete:${entry.label}`, () => rpc.call("hub_local_delete", { path: entry.path }));
+              }}
+            >
+              Delete plugin and its data
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

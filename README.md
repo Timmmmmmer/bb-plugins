@@ -29,7 +29,9 @@ The repository is public, so nothing needs a GitHub token.
   plugin by uploading its folder into `plugins/` on GitHub, or with
   `scripts/add-plugin.sh <folder | .zip>`. `bb hub plugin remove <repo>` stops
   pointing to a remote plugin. Delete a local plugin's folder (or add it to
-  `exclude`) to stop installing it.
+  `exclude`) to stop updating it, or delete it with the page's 🗑 button or
+  `bb hub plugin delete <folder> --yes`, which also uninstalls it, with its
+  data, from every member's bb.
 - **Add a marketplace plugin for everyone:** `bb hub marketplace search <words>`,
   then `bb hub marketplace add <id>@<marketplace>` (or **Search** and **Add for
   everyone** on the Plugin hub page). `bb hub marketplace remove <id>` takes

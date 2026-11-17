@@ -25,6 +25,7 @@ bb hub marketplace remove <id>[@<marketplace>] # take it off the list (machines 
 bb hub plugin add <source> [--subdir <path>] [--name <folder>] [--force] [--json]
                             # public repo → remote plugin (pointed to); folder or .zip/.tar → local plugin (copied in)
 bb hub plugin remove <repo> [--path <folder>]   # stop pointing to a remote plugin (stays installed)
+bb hub plugin delete <folder> --yes             # delete a local plugin AND uninstall it everywhere (data lost)
 ```
 
 `bb hub plugin add` (and the page's **Add a plugin** card, which also accepts
@@ -128,3 +129,15 @@ in `bb hub sync`.
   added as a remote entry, with nothing copied. Folders and archives are
   copied into `plugins/<folder>` as local plugins.
 - **Marketplace plugins**: see above.
+
+## Deleting a local plugin
+
+`bb hub plugin delete <folder> --yes` (or the page's 🗑 button, which shows a
+confirmation) removes `plugins/<folder>` from the shared repository and adds
+its plugin id to `packages.json` `"uninstall"`. Every hub then uninstalls that
+plugin at its next sync with `bb plugin remove`, which **deletes the plugin's
+data and settings on every machine**. A hub only uninstalls a plugin it
+installed from the shared repository, and never while a package with that id
+is still listed. Adding a plugin with that id again (local, remote, or
+marketplace) takes it off the list. This is irreversible for every member:
+always confirm with the user before passing `--yes`.
