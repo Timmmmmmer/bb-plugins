@@ -6,7 +6,7 @@ repository, so **no GitHub token or login is needed**.
 
 ## Before you start
 
-- bb 0.49 or newer, running. Check with `bb --version`.
+- bb 0.47.1 or newer, running. Check with `bb --version`.
 - `git` on the machine that runs the bb server.
 
 ## Install

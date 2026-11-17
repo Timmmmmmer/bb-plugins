@@ -437,12 +437,12 @@ export default async function plugin(bb: BbPluginApi) {
     if (applied.outcome === "rolled-back") {
       return { repo: label, pluginId, outcome: "failed", detail: applied.detail ?? "bb rolled the update back.", version: applied.from.version };
     }
-    bb.log.info(`updated ${pluginId} ${applied.from.label} -> ${applied.to?.label ?? "?"}`);
+    bb.log.info(`updated ${pluginId} ${applied.from.display} -> ${applied.to?.display ?? "?"}`);
     return {
       repo: label,
       pluginId,
       outcome: applied.applied ? "updated" : "current",
-      detail: applied.applied ? `${applied.from.label} → ${applied.to?.label ?? "latest"}` : null,
+      detail: applied.applied ? `${applied.from.display} → ${applied.to?.display ?? "latest"}` : null,
       version: applied.to?.version ?? applied.from.version,
     };
   }
@@ -470,8 +470,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (!(await folderChanged(packagesDir, check.installed.version, check.candidate.version, hubPath))) {
       return { result: { repo, pluginId, outcome: "current", detail: `no changes in ${hubPath}`, version }, start: false };
     }
-    const from = check.installed.label;
-    const to = check.candidate.label;
+    const from = check.installed.display;
+    const to = check.candidate.display;
     const attempt = await bb.storage.kv.get<SelfUpdateAttempt>(SELF_UPDATE_KEY);
     if (attempt !== undefined && attempt.from === from && attempt.to === to) {
       const inProgress = Date.now() - Date.parse(attempt.at) < SELF_UPDATE_GRACE_MS;
