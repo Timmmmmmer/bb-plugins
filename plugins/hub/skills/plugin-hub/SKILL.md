@@ -22,8 +22,9 @@ bb hub marketplace [--json]                   # marketplace plugins every hub in
 bb hub marketplace search <words> [--json]    # find entries in bb's marketplaces
 bb hub marketplace add <id>[@<marketplace>]   # add to packages.json for everyone (commits + pushes)
 bb hub marketplace remove <id>[@<marketplace>] # take it off the list (machines keep it installed)
-bb hub plugin add <source> [--name <folder>] [--subdir <path>] [--force] [--json]
-                            # add a plugin to the shared repo from a git URL, a folder, or a .zip/.tar file or URL
+bb hub plugin add <source> [--subdir <path>] [--name <folder>] [--force] [--json]
+                            # public repo → remote plugin (pointed to); folder or .zip/.tar → local plugin (copied in)
+bb hub plugin remove <repo> [--path <folder>]   # stop pointing to a remote plugin (stays installed)
 ```
 
 `bb hub plugin add` (and the page's **Add a plugin** card, which also accepts
@@ -108,3 +109,22 @@ the machine's git, and syncs. `remove` commits the removal; the plugin stays
 installed. Both publish to the shared repository and affect every member, so
 confirm with the user first. Results appear as `marketplace:<id>@<marketplace>`
 in `bb hub sync`.
+
+## Local, remote, and marketplace plugins
+
+- **Local plugins**: folders under `include` (`plugins/*`) of the shared
+  repository.
+- **Remote plugins**: `packages.json` `"remote"` entries
+  `{ "repo": "owner/name" | "https://…", "path"?: "folder", "ref"?: "…" }`.
+  bb installs them straight from that repository (with `path` as the
+  subdirectory; omitted means the root), and updates them only when that
+  folder changes. **Only public repositories work**: the hub reads anonymously,
+  and adding a private or missing repository fails with "it's private or
+  doesn't exist". SSH URLs are refused; use https. A GitHub folder link
+  (`https://github.com/o/r/tree/main/plugins/x`) gives the path and branch.
+  The older `"plugins"` key is still read as remote entries.
+- `bb hub plugin add` decides by source: a git repository (owner/name, https
+  URL; an existing local folder named like owner/name stays a folder) is
+  added as a remote entry, with nothing copied. Folders and archives are
+  copied into `plugins/<folder>` as local plugins.
+- **Marketplace plugins**: see above.

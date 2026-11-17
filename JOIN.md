@@ -1,6 +1,7 @@
 # Join the bb hub
 
-The hub installs the plugins listed in [`packages.json`](packages.json) and
+The hub installs the local, remote, and marketplace plugins in
+[`packages.json`](packages.json) and
 keeps them, and itself, up to date. Everything lives in this public
 repository, so **no GitHub token or login is needed**.
 
@@ -15,7 +16,7 @@ repository, so **no GitHub token or login is needed**.
 bb plugin install git:https://github.com/Timmmmmmer/bb-plugins.git --subdirectory plugins/hub --yes
 ```
 
-That's all. The hub starts a sync right away and installs every package. Check
+That's all. The hub starts a sync right away and installs every plugin. Check
 it with:
 
 ```sh
@@ -23,7 +24,7 @@ bb hub status
 bb hub sync
 ```
 
-Every package should say `installed` or `current`, and the last line should
+Every plugin should say `installed` or `current`, and the last line should
 say `hub (self) current`. The **Plugin hub** page in the bb sidebar shows the
 same information, plus every plugin folder in the repository with an Install
 button.
@@ -60,18 +61,19 @@ starts.
 
 ## Maintainers
 
-- **Add a plugin:** add its folder under `plugins/`, in any of these ways:
-  - `bb hub plugin add <git URL | folder | .zip/.tar file or URL>` (options
-    `--name`, `--subdir`, `--force`);
-  - the **Add a plugin** card on the Plugin hub page: paste a source, or
-    upload a folder or a `.zip` (up to 8 MB);
-  - `scripts/add-plugin.sh <source>` from a clone of this repository;
-  - GitHub's **Add file → Upload files**.
+- **Add a plugin:** `bb hub plugin add <source>` or the **Add a plugin** box
+  on the Plugin hub page.
+  - A **public** git repo (`owner/name`, an https URL, or a GitHub folder link)
+    becomes a **remote plugin**: nothing is copied; `packages.json` points to
+    it and every hub installs it from there. Private repositories are refused.
+  - A folder or `.zip`/`.tar` (file, URL, or dropped on the page, up to 8 MB)
+    is copied into `plugins/` as a **local plugin**, without `node_modules`,
+    `dist`, `.git`, or `.env`. Uploading the folder on GitHub, or
+    `scripts/add-plugin.sh <folder | .zip>`, does the same.
 
-  The first two copy the plugin in (without `node_modules`, `dist`, `.git`,
-  `.env`), check it, commit, and push with the git login of the machine
-  running bb (run `gh auth setup-git` there if pushing fails). Every running
-  hub installs it at the next sync.
+  Either way it pushes with the git login of the machine running bb (run
+  `gh auth setup-git` there if pushing fails). Every running hub installs it at
+  the next sync.
 - **Add a plugin from bb's marketplaces** (bb-community, bb-official, or a
   third-party one): `bb hub marketplace search <words>`, then
   `bb hub marketplace add <id>@<marketplace>`. The Plugin hub page has the
@@ -79,13 +81,14 @@ starts.
   own catalog and keeps it updated. A third-party marketplace is registered
   automatically on machines that don't have it. `bb hub marketplace remove <id>`
   takes it off the list (it stays installed).
-- **Stop installing one:** delete its folder, or add it to `exclude` in
-  `packages.json`, and push. Machines keep the plugin installed but stop
-  updating it.
-- Each folder needs a distinct plugin id (the `name` in its `package.json`).
-  The script refuses a duplicate, and the hub reports the second folder as
-  `failed`.
-- **Ship an update:** push to the plugin's folder.
+- **Stop installing one:** for a remote plugin, `bb hub plugin remove <repo>`
+  (or ✕ on the page). For a local plugin, delete its folder (or add it to
+  `exclude` in `packages.json`) and push. Machines keep the plugin installed
+  but stop updating it.
+- Every plugin needs a distinct plugin id (the `name` in its `package.json`).
+  Adding a duplicate is refused, and the hub reports a second one as `failed`.
+- **Ship an update:** push to the plugin: its folder here, or its own
+  repository for a remote plugin.
 
 Anyone who can push to this repository changes what every member's hub
 installs, so keep write access to a few people, and review pull requests

@@ -54,21 +54,58 @@ function Empty({ children }: { children: ReactNode }) {
 // ---------------------------------------------------------------------------
 // 1-2. Packages and marketplace plugins
 
-function Packages({ data }: { data: HubData }) {
+function LocalPlugins({ data }: { data: HubData }) {
+  const local = data.packages.filter((entry) => entry.kind === "local");
   const nameFor = (entry: PackageView) => data.folders.find((folder) => folder.path === entry.path)?.name ?? entry.label;
   const resultFor = (label: string) => data.lastSync?.results.find((result) => result.repo === label) ?? null;
   return (
     <>
-      <Title>Packages</Title>
-      {data.packages.length === 0 ? (
-        <Empty>No packages yet.</Empty>
+      <Title>Local plugins</Title>
+      {local.length === 0 ? (
+        <Empty>None yet.</Empty>
       ) : (
         <List>
-          {data.packages.map((entry) => (
+          {local.map((entry) => (
             <Row key={entry.label} name={nameFor(entry)} result={resultFor(entry.label)} />
           ))}
         </List>
       )}
+    </>
+  );
+}
+
+function RemotePlugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
+  const remote = data.packages.filter((entry) => entry.kind === "remote");
+  const resultFor = (label: string) => data.lastSync?.results.find((result) => result.repo === label) ?? null;
+  if (remote.length === 0) return null;
+  return (
+    <>
+      <Title>Remote plugins</Title>
+      <List>
+        {remote.map((entry) => (
+          <Row
+            key={entry.label}
+            name={entry.label}
+            result={resultFor(entry.label)}
+            action={
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6 text-muted-foreground hover:text-foreground"
+                aria-label={`Remove ${entry.label}`}
+                disabled={busy !== null}
+                onClick={() =>
+                  void run(`rremove:${entry.label}`, () =>
+                    rpc.call("hub_remote_remove", { repo: entry.repo, ...(entry.path ? { path: entry.path } : {}) }),
+                  )
+                }
+              >
+                <Icon name="X" className="size-3.5" />
+              </Button>
+            }
+          />
+        ))}
+      </List>
     </>
   );
 }
@@ -185,7 +222,11 @@ function AddPlugin({ busy, rpc, run }: { busy: string | null; rpc: Rpc; run: Run
       setMessage(null);
       const added = await rpc.call("hub_add_plugin", input as never);
       setUrl("");
-      setMessage(added.unchanged ? `${added.folder} is unchanged.` : `Added ${added.folder}. Everyone has it by ${time(Date.parse(added.guaranteedBy))}.`);
+      setMessage(
+        added.unchanged
+          ? `${added.folder} is unchanged.`
+          : `${added.kind === "remote" ? "Now pointing to" : "Copied in"} ${added.folder}. Everyone has it by ${time(Date.parse(added.guaranteedBy))}.`,
+      );
     });
 
   const addFiles = async (files: { path: string; file: File }[]) => {
@@ -238,7 +279,7 @@ function AddPlugin({ busy, rpc, run }: { busy: string | null; rpc: Rpc; run: Run
           <Input
             value={url}
             onChange={(event) => setUrl(event.target.value)}
-            placeholder="Drop a folder or .zip here, or paste a link"
+            placeholder="Drop a folder or .zip, or paste a public repo link"
             aria-label="Plugin link"
             className="h-8"
           />
@@ -260,7 +301,10 @@ function AddPlugin({ busy, rpc, run }: { busy: string | null; rpc: Rpc; run: Run
             }}
           />
         </form>
-        {message === null ? null : <p className="mt-2 text-xs text-muted-foreground">{message}</p>}
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          Repos are pointed to (they must be public); folders and zips are copied in.
+        </p>
+        {message === null ? null : <p className="mt-1 text-xs">{message}</p>}
       </div>
     </>
   );
@@ -365,7 +409,8 @@ function HubPage() {
           <p className="mt-4 text-sm text-muted-foreground">Loading…</p>
         ) : (
           <>
-            <Packages data={data} />
+            <LocalPlugins data={data} />
+            <RemotePlugins data={data} busy={busy} rpc={rpc} run={run} />
             <MarketplacePlugins data={data} busy={busy} rpc={rpc} run={run} />
             <SyncLine data={data} busy={busy} rpc={rpc} run={run} />
             <AddPlugin busy={busy} rpc={rpc} run={run} />

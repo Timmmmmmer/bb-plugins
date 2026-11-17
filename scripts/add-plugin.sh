@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Add a bb plugin to this repository from any source, then commit and push.
+# Copy a bb plugin into this repository as a local plugin, then commit and push.
 # Every running hub installs it at the next shared sync.
 #
 #   scripts/add-plugin.sh <source> [--name <folder>] [--subdir <path>] [--force] [--no-push]
 #
 # <source> can be:
 #   a local folder         ./my-plugin   ~/code/bb-plugin-weather
-#   a git repository       https://github.com/someone/bb-plugin-x   git@github.com:someone/x.git
+#   (git repositories aren't copied: add them as remote plugins with `bb hub plugin add <repo>`)
 #   an archive (file/URL)  plugin.zip   plugin.tar.gz   https://example.com/plugin.zip
 #
 #   --name <folder>   folder name under plugins/ (default: the plugin id)
@@ -62,9 +62,7 @@ case "$SOURCE" in
     if [ "$entries" = 1 ] && [ -d "$first" ]; then BASE="$first"; fi
     DESC="archive ${SOURCE##*/}" ;;
   http://*|https://*|git@*|ssh://*|*.git)
-    git clone --quiet --depth 1 "$SOURCE" "$WORK/repo" || die "could not clone $SOURCE"
-    BASE="$WORK/repo"
-    DESC="$SOURCE@$(git -C "$WORK/repo" rev-parse --short HEAD)" ;;
+    die "git repositories aren't copied in; they're pointed to as remote plugins. Run: bb hub plugin add $SOURCE (the repository must be public)" ;;
   *)
     [ -d "$SOURCE" ] || die "'$SOURCE' is not a folder, git URL, or archive"
     BASE=$(cd "$SOURCE" && pwd)

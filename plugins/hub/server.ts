@@ -60,8 +60,8 @@ function nextBoundary(fromMs: number, intervalMinutes: number): number {
 // packages.json
 
 const packageEntrySchema = z.object({
-  /** The plugin's folder, e.g. "plugins/hello". */
-  path: z.string().trim().min(1),
+  /** The plugin's folder, e.g. "plugins/hello"; omitted = the repository root. */
+  path: z.string().trim().optional(),
   /** Another public repository ("owner/name"); defaults to the packages repo. */
   repo: z.string().trim().min(1).optional(),
   /** Branch, tag, or "semver:[prefix:]range"; defaults to the default branch. */
@@ -73,7 +73,10 @@ const packagesFileSchema = z.object({
   include: z.array(z.string().trim().min(1)).max(20).optional(),
   /** Folders to leave out of `include`, e.g. "plugins/experimental". */
   exclude: z.array(z.string().trim().min(1)).max(200).optional(),
+  /** Older name for "remote"; still read. */
   plugins: z.array(packageEntrySchema).max(100).optional(),
+  /** Remote plugins: other public repositories, installed straight from there. */
+  remote: z.array(packageEntrySchema).max(100).optional(),
   /** Plugins from bb's marketplaces (bb-community, bb-official, or a third-party one). */
   marketplace: z.array(z.object({
     /** The catalog entry id, as in `bb plugin install <id>@<marketplace>`. */
@@ -108,23 +111,65 @@ function parseEntryArg(arg: string): { id: string; marketplace: string | null } 
 }
 
 interface RepoRef {
+  /** GitHub owner, or "<host>/<path>" for other hosts. */
   owner: string;
   name: string;
+  /** The anonymous https clone URL. */
+  url: string;
 }
 interface PackageSpec extends RepoRef {
+  /** The plugin's folder in the repository; "" is the repository root. */
   path: string;
   ref: string | null;
 }
 
-function parseRepo(input: string): RepoRef {
-  const [owner, name, ...rest] = input.trim().replace(/\.git$/iu, "").split("/");
-  if (owner === undefined || name === undefined || rest.length > 0 || !OWNER_PATTERN.test(owner) || !NAME_PATTERN.test(name)) {
-    throw new Error(`"${input}" is not a GitHub repository (expected owner/name).`);
+/**
+ * A public git repository: "owner/name" (GitHub), or an https URL. GitHub
+ * links to a folder (`…/tree/<branch>/<folder>`) also give the folder and
+ * branch. SSH URLs are refused: the hub only reads public repositories.
+ */
+function parseRepoInput(input: string): { repo: RepoRef; path: string | null; ref: string | null } {
+  const text = input.trim().replace(/\/+$/u, "");
+  if (/^(git@|ssh:\/\/)/iu.test(text)) {
+    throw new Error(`"${input}" is an SSH URL. Use the https URL; the hub only reads public repositories.`);
   }
-  return { owner, name };
+  if (!/^https?:\/\//iu.test(text)) {
+    const [owner, name, ...rest] = text.replace(/\.git$/iu, "").split("/");
+    if (owner === undefined || name === undefined || rest.length > 0 || !OWNER_PATTERN.test(owner) || !NAME_PATTERN.test(name)) {
+      throw new Error(`"${input}" is not a repository (expected owner/name or an https git URL).`);
+    }
+    return { repo: { owner, name, url: `https://github.com/${owner}/${name}.git` }, path: null, ref: null };
+  }
+  const url = new URL(text);
+  if (url.protocol !== "https:") throw new Error(`"${input}" must be an https URL.`);
+  const parts = url.pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+  if (url.hostname.toLowerCase() === "github.com") {
+    const [owner, rawName, kind, ref, ...rest] = parts;
+    const name = rawName?.replace(/\.git$/iu, "");
+    if (owner === undefined || name === undefined || !OWNER_PATTERN.test(owner) || !NAME_PATTERN.test(name)) {
+      throw new Error(`"${input}" is not a GitHub repository URL.`);
+    }
+    const isFolderLink = (kind === "tree" || kind === "blob") && ref !== undefined;
+    return {
+      repo: { owner, name, url: `https://github.com/${owner}/${name}.git` },
+      path: isFolderLink && rest.length > 0 ? rest.join("/") : null,
+      ref: isFolderLink ? ref : null,
+    };
+  }
+  const name = parts.at(-1)?.replace(/\.git$/iu, "");
+  if (name === undefined || !NAME_PATTERN.test(name) || parts.slice(0, -1).some((part) => !NAME_PATTERN.test(part))) {
+    throw new Error(`"${input}" is not a git repository URL.`);
+  }
+  const owner = [url.host.toLowerCase(), ...parts.slice(0, -1)].join("/");
+  return { repo: { owner, name, url: `https://${url.host}${url.pathname.replace(/\/+$/u, "")}` }, path: null, ref: null };
 }
-const repoKey = (repo: RepoRef) => `${repo.owner}/${repo.name}`.toLowerCase();
-const repoUrl = (repo: RepoRef) => `https://github.com/${repo.owner}/${repo.name}.git`;
+const parseRepo = (input: string): RepoRef => parseRepoInput(input).repo;
+const repoKey = (repo: RepoRef) => repo.url.toLowerCase().replace(/\.git$/u, "");
+const repoUrl = (repo: RepoRef) => repo.url;
+const repoDisplay = (repo: RepoRef) =>
+  repo.url.toLowerCase().startsWith("https://github.com/") ? `${repo.owner}/${repo.name}` : repo.url;
+/** A file inside a plugin folder ("" = repository root), for `git show`. */
+const inFolder = (folder: string, file: string) => (folder === "" ? file : `${folder}/${file}`);
 
 /** bb's rule: final package-name component minus `bb-plugin-`, slugified. */
 function pluginIdForPackageName(packageName: string): string {
@@ -178,7 +223,14 @@ const folderSchema = z.object({
 });
 export type PluginFolder = z.infer<typeof folderSchema>;
 
-const packageViewSchema = z.object({ label: z.string(), path: z.string(), repo: z.string(), ref: z.string().nullable() });
+const packageViewSchema = z.object({
+  label: z.string(),
+  path: z.string(),
+  repo: z.string(),
+  ref: z.string().nullable(),
+  /** local: a folder in the shared repository; remote: another public repository. */
+  kind: z.enum(["local", "remote"]),
+});
 export type PackageView = z.infer<typeof packageViewSchema>;
 
 export const rpcContract = defineRpcContract({
@@ -254,9 +306,14 @@ export const rpcContract = defineRpcContract({
       commit: z.string().nullable(),
       warning: z.string().nullable(),
       unchanged: z.boolean(),
+      kind: z.enum(["local", "remote"]),
       guaranteedBy: z.string(),
       sync: syncResultSchema.nullable(),
     }),
+  },
+  hub_remote_remove: {
+    input: z.object({ repo: z.string().trim().min(1).max(500), path: z.string().trim().max(200).optional() }),
+    output: z.object({ removed: z.array(z.string()), commit: z.string().nullable(), guaranteedBy: z.string() }),
   },
 });
 
@@ -399,14 +456,14 @@ export default async function plugin(bb: BbPluginApi) {
       }
     } catch (cause) {
       if (!exists) await rm(dir, { recursive: true, force: true });
-      throw new Error(`Could not read ${repo.owner}/${repo.name} from GitHub (${errorMessage(cause)}). Is it public?`);
+      throw new Error(`Can't read ${repoDisplay(repo)}: it's private or doesn't exist. Only public repositories work.`);
     }
     fetchedThisRound.add(dir);
     return dir;
   }
 
   async function readPackageJson(dir: string, folder: string, rev = "HEAD") {
-    return packageJsonSchema.parse(JSON.parse(await git(["show", `${rev}:${folder}/package.json`], dir)));
+    return packageJsonSchema.parse(JSON.parse(await git(["show", `${rev}:${inFolder(folder, "package.json")}`], dir)));
   }
 
   /** Whether `folder` differs between two commits; unknown counts as changed. */
@@ -414,8 +471,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (!COMMIT_PATTERN.test(from) || !COMMIT_PATTERN.test(to)) return true;
     try {
       const [before, after] = await Promise.all([
-        git(["rev-parse", `${from}:${folder}`], dir),
-        git(["rev-parse", `${to}:${folder}`], dir),
+        git(["rev-parse", folder === "" ? `${from}^{tree}` : `${from}:${folder}`], dir),
+        git(["rev-parse", folder === "" ? `${to}^{tree}` : `${to}:${folder}`], dir),
       ]);
       return before.trim() !== after.trim();
     } catch {
@@ -466,11 +523,11 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
     }
-    for (const entry of file.plugins ?? []) {
+    for (const entry of [...(file.remote ?? []), ...(file.plugins ?? [])]) {
       try {
         const repo = entry.repo === undefined ? packagesRepo : parseRepo(entry.repo);
-        const folder = entry.path.replace(/\/+$/u, "");
-        if (!PATH_PATTERN.test(folder)) throw new Error(`Invalid path "${entry.path}".`);
+        const folder = (entry.path ?? "").replace(/^\/+|\/+$/gu, "");
+        if (folder !== "" && !PATH_PATTERN.test(folder)) throw new Error(`Invalid path "${entry.path}".`);
         if (entry.ref !== undefined && !REF_PATTERN.test(entry.ref)) throw new Error(`Invalid ref "${entry.ref}".`);
         const key = `${repoKey(repo)}|${folder}`;
         if (!seen.has(key)) {
@@ -495,11 +552,14 @@ export default async function plugin(bb: BbPluginApi) {
       }
       marketplace.push({ id: entry.id, marketplace: entry.marketplace ?? null, source: entry.source ?? null, subdirectory: entry.subdirectory ?? null });
     }
-    return { from: `${packagesRepo.owner}/${packagesRepo.name}/packages.json`, packagesRepo, specs, marketplace, errors };
+    return { from: `${repoDisplay(packagesRepo)}/packages.json`, packagesRepo, specs, marketplace, errors };
   }
 
+  const isLocal = (spec: PackageSpec, packagesRepo: RepoRef) => repoKey(spec) === repoKey(packagesRepo);
   const labelFor = (spec: PackageSpec, packagesRepo: RepoRef) =>
-    `${repoKey(spec) === repoKey(packagesRepo) ? "" : `${spec.owner}/${spec.name}/`}${spec.path}${spec.ref ? `@${spec.ref}` : ""}`;
+    isLocal(spec, packagesRepo)
+      ? `${spec.path}${spec.ref ? `@${spec.ref}` : ""}`
+      : `${repoDisplay(spec)}${spec.path ? `/${spec.path}` : ""}${spec.ref ? `@${spec.ref}` : ""}`;
   const sourceFor = (spec: PackageSpec) => `git:${repoUrl(spec)}${spec.ref ? `@${spec.ref}` : ""}`;
   const isHubSource = (installedSource: string, spec: PackageSpec) => {
     const base = `git:${repoUrl(spec)}`.toLowerCase();
@@ -530,7 +590,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const installed = (await bb.sdk.plugins.list()).plugins.find((entry) => entry.id === pluginId);
     if (installed === undefined) {
-      const result = await bb.sdk.plugins.install({ source: sourceFor(spec), subdirectory: spec.path });
+      const result = await bb.sdk.plugins.install({ source: sourceFor(spec), ...(spec.path ? { subdirectory: spec.path } : {}) });
       bb.log.info(`installed ${result.id}@${result.version} from ${label}`);
       return { repo: label, pluginId, outcome: "installed", detail: null, version: result.version };
     }
@@ -539,7 +599,7 @@ export default async function plugin(bb: BbPluginApi) {
         repo: label,
         pluginId,
         outcome: "other-source",
-        detail: `Installed from ${installed.source}. Run \`bb hub adopt ${spec.path}\` to switch it to ${spec.owner}/${spec.name} (this deletes the plugin's settings and data).`,
+        detail: `Installed from ${installed.source}. Run \`bb hub adopt ${spec.path || repoDisplay(spec)}\` to switch it to ${repoDisplay(spec)} (this deletes the plugin's settings and data).`,
         version: installed.version,
       };
     }
@@ -936,13 +996,14 @@ export default async function plugin(bb: BbPluginApi) {
       });
     }
     return {
-      repo: `${packages.packagesRepo.owner}/${packages.packagesRepo.name}`,
+      repo: repoDisplay(packages.packagesRepo),
       folders,
       packages: packages.specs.map((spec) => ({
         label: labelFor(spec, packages.packagesRepo),
         path: spec.path,
-        repo: `${spec.owner}/${spec.name}`,
+        repo: repoDisplay(spec),
         ref: spec.ref,
+        kind: isLocal(spec, packages.packagesRepo) ? ("local" as const) : ("remote" as const),
       })),
       marketplace: packages.marketplace.map((entry) => ({
         label: marketplaceLabel(entry),
@@ -1185,10 +1246,107 @@ export default async function plugin(bb: BbPluginApi) {
     return (await git(["rev-parse", "--short", "HEAD"], work)).trim();
   }
 
+  /** Whether a typed source names a git repository (rather than a folder or archive). */
+  async function isRepoSource(text: string, cwd: string | undefined): Promise<boolean> {
+    const trimmed = text.trim();
+    if (ARCHIVE_PATTERN.test(trimmed.split(/[?#]/u)[0] ?? "")) return false;
+    if (/^(https?:\/\/|git@|ssh:\/\/)/iu.test(trimmed)) return true;
+    // "owner/name" means GitHub, unless it is an existing folder on this machine.
+    if (/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/u.test(trimmed)) {
+      return !(await stat(path.resolve(cwd ?? process.cwd(), trimmed)).then((info) => info.isDirectory(), () => false));
+    }
+    return false;
+  }
+
+  /**
+   * Point to a plugin in another public repository: nothing is copied, a
+   * "remote" entry goes into packages.json, and every hub installs it from
+   * that repository. Private repositories can't be added.
+   */
+  async function addRemotePlugin(text: string, options: { subdir?: string }) {
+    const result = await serialize(async () => {
+      const { packagesRepo } = await readConfig();
+      const parsed = parseRepoInput(text);
+      if (repoKey(parsed.repo) === repoKey(packagesRepo)) {
+        throw new Error("That is the shared repository itself; its plugins/ folders are already local plugins.");
+      }
+      await git(["ls-remote", "--heads", parsed.repo.url]).catch(() => {
+        throw new Error(`Can't read ${repoDisplay(parsed.repo)}: it's private or doesn't exist. Only public repositories can be added.`);
+      });
+      const scratch = await scratchDir();
+      try {
+        const clone = path.join(scratch, "repo");
+        await git(["clone", "--quiet", "--depth", "1", ...(parsed.ref ? ["--branch", parsed.ref] : []), parsed.repo.url, clone]);
+        const subdir = options.subdir?.trim() || parsed.path || undefined;
+        const pluginDir = await findPluginDir(clone, subdir);
+        const { pluginId, warning } = await checkManifest(pluginDir);
+        if (pluginId === bb.pluginId) throw new Error("That is the hub itself.");
+        const folder = path.relative(clone, pluginDir).split(path.sep).join("/");
+        const spec: PackageSpec = { ...parsed.repo, path: folder, ref: parsed.ref };
+        const label = labelFor(spec, packagesRepo);
+        // bb installs one plugin per id, so the id must be new.
+        fetchedThisRound.clear();
+        const packages = await loadPackages();
+        for (const other of packages.specs) {
+          if (repoKey(other) === repoKey(spec) && other.path === folder) throw new Error(`${label} is already a remote plugin.`);
+          const otherId = await readPackageJson(await syncMirror(other), other.path).then((manifest) => pluginIdForPackageName(manifest.name), () => null);
+          if (otherId === pluginId) throw new Error(`Plugin id "${pluginId}" is already used by ${labelFor(other, packagesRepo)}.`);
+        }
+        const entry: Record<string, string> = { repo: repoDisplay(parsed.repo) };
+        if (folder !== "") entry.path = folder;
+        if (parsed.ref) entry.ref = parsed.ref;
+        const commit = await editPackagesJson((document) => {
+          const list = z.array(z.record(z.string(), z.unknown())).catch([]).parse(document.remote ?? []);
+          return { ...document, remote: [...list, entry] };
+        }, `Add remote plugin ${label}`);
+        bb.log.info(`added remote plugin ${label} (${pluginId}) as ${commit ?? "?"}`);
+        return { folder: label, pluginId, commit, warning, unchanged: false, kind: "remote" as const };
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
+    });
+    const report = await requestSync("plugin added");
+    const sync = report.results.find((entry) => entry.pluginId === result.pluginId) ?? null;
+    bb.realtime.publish(HUB_CHANGED, { added: result.folder });
+    return { ...result, guaranteedBy: scheduleView(null).guaranteedBy, sync };
+  }
+
+  /** Stop pointing to a remote plugin (machines keep it installed). */
+  async function removeRemotePlugin(text: string, pathFilter?: string) {
+    const outcome = await serialize(async () => {
+      const parsed = parseRepoInput(text);
+      const folder = (pathFilter ?? parsed.path ?? "").replace(/^\/+|\/+$/gu, "");
+      let removed: string[] = [];
+      const matches = (item: Record<string, unknown>) => {
+        try {
+          return repoKey(parseRepo(String(item.repo ?? ""))) === repoKey(parsed.repo) && (folder === "" || String(item.path ?? "") === folder);
+        } catch {
+          return false;
+        }
+      };
+      const commit = await editPackagesJson((document) => {
+        const next = { ...document };
+        for (const key of ["remote", "plugins"] as const) {
+          const list = z.array(z.record(z.string(), z.unknown())).catch([]).parse(document[key] ?? []);
+          removed = [...removed, ...list.filter(matches).map((item) => `${String(item.repo)}${item.path ? `/${String(item.path)}` : ""}`)];
+          if (document[key] !== undefined) next[key] = list.filter((item) => !matches(item));
+        }
+        if (removed.length === 0) throw new Error(`${text} is not a remote plugin.`);
+        return next;
+      }, `Remove remote plugin ${repoDisplay(parsed.repo)}${folder ? `/${folder}` : ""}`);
+      return { removed, commit };
+    });
+    bb.realtime.publish(HUB_CHANGED, { removed: outcome.removed });
+    return { ...outcome, guaranteedBy: scheduleView(null).guaranteedBy };
+  }
+
   async function addPlugin(
     source: AddSource,
     options: { name?: string; subdir?: string; force?: boolean },
   ) {
+    if (source.kind === "text" && (await isRepoSource(source.source, source.cwd))) {
+      return addRemotePlugin(source.source, { subdir: options.subdir });
+    }
     const result = await serialize(async () => {
       const { packagesRepo, hubPath } = await readConfig();
       const scratch = await scratchDir();
@@ -1219,9 +1377,9 @@ export default async function plugin(bb: BbPluginApi) {
           await writeFile(path.join(dest, ".gitignore"), "node_modules/\ndist/\n");
         }
         const commit = await commitAndPush(work, [folder], `Add plugin ${folderName} (from ${description})`, packagesRepo);
-        if (commit === null) return { folder, pluginId, commit: null, warning, unchanged: true };
+        if (commit === null) return { folder, pluginId, commit: null, warning, unchanged: true, kind: "local" as const };
         bb.log.info(`added ${folder} (${pluginId}) from ${description} as ${commit}`);
-        return { folder, pluginId, commit, warning, unchanged: false };
+        return { folder, pluginId, commit, warning, unchanged: false, kind: "local" as const };
       } finally {
         await rm(scratch, { recursive: true, force: true });
       }
@@ -1313,6 +1471,10 @@ export default async function plugin(bb: BbPluginApi) {
       clientOnly(context, "hub_marketplace_remove");
       return removeMarketplacePlugin(entry);
     },
+    hub_remote_remove: ({ repo, path: folder }, context) => {
+      clientOnly(context, "hub_remote_remove");
+      return removeRemotePlugin(repo, folder);
+    },
     hub_add_plugin: (input, context) => {
       clientOnly(context, "hub_add_plugin");
       const source: AddSource =
@@ -1358,7 +1520,7 @@ export default async function plugin(bb: BbPluginApi) {
                 ? `No plugin folders in ${hub.repo}.`
                 : hub.folders
                     .map((folder) =>
-                      `${folder.installed ? `[installed ${folder.installedVersion}]` : "[available]"}${folder.isPackage ? " [package]" : ""}  ${folder.path} — ${folder.name}${folder.description ? `: ${folder.description}` : ""}`,
+                      `${folder.installed ? `[installed ${folder.installedVersion}]` : "[available]"}${folder.isPackage ? " [local plugin]" : ""}  ${folder.path} — ${folder.name}${folder.description ? `: ${folder.description}` : ""}`,
                     )
                     .join("\n"),
             };
@@ -1383,17 +1545,29 @@ export default async function plugin(bb: BbPluginApi) {
           },
         }),
         packages: cliCommand({
-          summary: "Show packages.json: the plugins every hub keeps installed",
+          summary: "Show what every hub installs: local plugins (plugins/ folders) and remote plugins (other public repos)",
           options: jsonOption,
           async run({ options }) {
             const packages = await serialize(async () => {
               fetchedThisRound.clear();
               return loadPackages();
             }).catch((cause) => { throw toCliError(cause); });
-            const view = { from: packages.from, plugins: packages.specs.map((spec) => labelFor(spec, packages.packagesRepo)), errors: packages.errors };
+            const local = packages.specs.filter((spec) => isLocal(spec, packages.packagesRepo)).map((spec) => labelFor(spec, packages.packagesRepo));
+            const remote = packages.specs.filter((spec) => !isLocal(spec, packages.packagesRepo)).map((spec) => labelFor(spec, packages.packagesRepo));
+            const market = packages.marketplace.map((entry) => `${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}`);
+            const view = { from: packages.from, local, remote, marketplace: market, errors: packages.errors };
+            const section = (title: string, items: string[]) => [`${title}:`, ...(items.length === 0 ? ["  (none)"] : items.map((item) => `  ${item}`))];
             return {
               exitCode: 0,
-              stdout: options.json ? JSON.stringify(view) : [`From ${view.from}:`, ...view.plugins.map((p) => `  ${p}`), ...view.errors].join("\n"),
+              stdout: options.json
+                ? JSON.stringify(view)
+                : [
+                    `From ${view.from}`,
+                    ...section("Local plugins", local),
+                    ...section("Remote plugins", remote),
+                    ...section("Marketplace plugins", market),
+                    ...view.errors,
+                  ].join("\n"),
             };
           },
         }),
@@ -1483,15 +1657,35 @@ export default async function plugin(bb: BbPluginApi) {
             };
           },
         }),
+        "plugin remove": cliCommand({
+          summary: "Stop pointing to a remote plugin (commits and pushes); machines keep it installed",
+          description: "Local plugins (folders in plugins/) are removed by deleting their folder in the shared repository.",
+          positionals: [{ name: "repo", description: "The remote plugin's repo: owner/name, https URL, or GitHub folder link", required: true }],
+          options: {
+            path: { type: "string", placeholder: "folder", description: "Only the entry for this folder in that repo" },
+            ...jsonOption,
+          },
+          async run({ positionals, options }) {
+            const removed = await removeRemotePlugin(positionals.repo, options.path).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(removed) };
+            return {
+              exitCode: 0,
+              stdout: [
+                `Removed remote plugin ${removed.removed.join(", ")}${removed.commit ? ` (commit ${removed.commit})` : ""}.`,
+                "Machines keep it installed but stop updating it; uninstall it with `bb plugin remove <id>` where it's no longer wanted.",
+              ].join("\n"),
+            };
+          },
+        }),
         "plugin add": cliCommand({
-          summary: "Add a plugin to the shared repository from a git repo, a local folder, or a .zip/.tar (file or URL); commits, pushes, and installs it",
+          summary: "Add a plugin for everyone: a public git repo is pointed to (remote plugin); a folder or .zip/.tar is copied into plugins/ (local plugin)",
           description:
-            "Pushes with the git credentials of the machine running bb (the hub stores none). Local paths are on that machine. Every running hub installs the plugin at the next shared sync.",
+            "A git repository (owner/name, an https URL, or a GitHub folder link) must be public; it is recorded in packages.json and installed from there. Folders and archives are copied into the shared repository. Pushes with the git credentials of the machine running bb (the hub stores none). Local paths are on that machine. Every running hub installs the plugin at the next shared sync.",
           positionals: [
-            { name: "source", description: "Git URL, folder path, or .zip/.tar(.gz) file or URL", required: true },
+            { name: "source", description: "Public git repo (owner/name or https URL), folder path, or .zip/.tar(.gz) file or URL", required: true },
           ],
           options: {
-            name: { type: "string", placeholder: "folder", description: "Folder name under plugins/ (default: the plugin id)" },
+            name: { type: "string", placeholder: "folder", description: "For copied plugins: folder name under plugins/ (default: the plugin id)" },
             subdir: { type: "string", placeholder: "path", description: "The plugin's folder inside the source, when it holds several" },
             force: { type: "boolean", description: "Replace plugins/<folder> if it already exists" },
             ...jsonOption,
@@ -1507,7 +1701,9 @@ export default async function plugin(bb: BbPluginApi) {
               stdout: [
                 added.unchanged
                   ? `${added.folder} is unchanged; nothing to commit.`
-                  : `Added ${added.folder} (plugin id ${added.pluginId}) and pushed commit ${added.commit}.`,
+                  : added.kind === "remote"
+                    ? `Added remote plugin ${added.folder} (plugin id ${added.pluginId}); nothing copied. Pushed commit ${added.commit}.`
+                    : `Copied into ${added.folder} as a local plugin (plugin id ${added.pluginId}) and pushed commit ${added.commit}.`,
                 ...(added.warning ? [`Note: ${added.warning}`] : []),
                 ...(added.sync ? [`This machine: ${formatResult(added.sync)}`] : []),
                 `Every running hub has it by ${formatTime(added.guaranteedBy)}; hubs that are off get it when they start.`,

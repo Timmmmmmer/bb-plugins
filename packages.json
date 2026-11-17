@@ -1,11 +1,11 @@
 {
-  "$comment": "What every hub installs. include: every subfolder of these folders that holds a bb plugin is installed (so adding a plugin is just adding a folder). exclude: folders to leave out. plugins: extra entries, e.g. from another public repo ({ \"path\", \"repo\"?, \"ref\"? }). marketplace: plugins from bb's marketplaces ({ \"id\", \"marketplace\"?, \"source\"? }); manage them with `bb hub marketplace add/remove`. syncIntervalMinutes (5-1440): the shared sync interval; every hub syncs at the same UTC-aligned times.",
+  "$comment": "What every hub installs. Local plugins: every folder under the include patterns (plugins/*) that holds a bb plugin, except exclude. Remote plugins: other PUBLIC repositories, installed straight from there ({ \"repo\": \"owner/name or https URL\", \"path\"?: \"folder in that repo\", \"ref\"?: \"branch/tag/semver:...\" }); private repositories are not supported. Marketplace plugins: from bb's marketplaces ({ \"id\", \"marketplace\"?, \"source\"? }). Manage them with bb hub plugin add/remove and bb hub marketplace add/remove. syncIntervalMinutes (5-1440): the shared sync interval; every hub syncs at the same UTC-aligned times.",
   "syncIntervalMinutes": 15,
   "include": [
     "plugins/*"
   ],
   "exclude": [],
-  "plugins": [],
+  "remote": [],
   "marketplace": [
     {
       "id": "bb-sidebar",

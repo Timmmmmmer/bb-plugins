@@ -5,36 +5,36 @@ installs them and keeps them up to date on every member's machine.
 
 | Folder | Plugin |
 |---|---|
-| [`plugins/hub`](plugins/hub) | **Hub**: installs the plugins listed in [`packages.json`](packages.json), updates them, and updates itself |
+| [`plugins/hub`](plugins/hub) | **Hub**: installs the local, remote, and marketplace plugins in [`packages.json`](packages.json), updates them, and updates itself |
 | [`plugins/hello`](plugins/hello) | **Hello**: an example todo list (`bb hello`) |
 | [`plugins/sidebar-text`](plugins/sidebar-text) | **Sidebar text**: a sidebar page that shows a message |
 
 The repository is public, so nothing needs a GitHub token.
 
 - **Join:** see [JOIN.md](JOIN.md). It's one command.
-- **Add a plugin:** put its folder in `plugins/<name>/`. That's it: every
-  folder there that holds a bb plugin is installed on every hub. Any of these
-  works:
-  - **From bb:** `bb hub plugin add <git URL | folder | .zip/.tar file or URL>`,
-    or the **Add a plugin** card on the Plugin hub page (paste a source, or
-    upload a folder or `.zip`). It pushes with the bb machine's own git login.
-  - **In the browser:** on GitHub, open `plugins/`, choose **Add file → Upload
-    files**, and drag in the plugin's folder (without `node_modules`).
-  - **From any source** (local folder, git repository, or `.zip`/`.tar.gz`):
-    ```sh
-    scripts/add-plugin.sh ~/code/my-plugin
-    scripts/add-plugin.sh https://github.com/someone/bb-plugin-weather
-    scripts/add-plugin.sh https://example.com/plugin.zip --subdir plugin
-    ```
-    It copies the plugin in (without `node_modules`, `dist`, `.git`, `.env`),
-    checks the manifest, commits, and pushes. `--help` lists the options.
+- **Three kinds of plugins** every hub installs:
+  - **Local plugins**: folders in `plugins/` of this repository.
+  - **Remote plugins**: plugins in other **public** repositories. Nothing is
+    copied; `packages.json` points to the repository and every hub installs it
+    from there. Private repositories can't be used.
+  - **Marketplace plugins**: entries from bb's marketplaces.
+- **Add a plugin:** `bb hub plugin add <source>`, or the **Add a plugin** box on
+  the Plugin hub page:
+  - a public repo (`owner/name`, an https URL, or a GitHub folder link) becomes
+    a **remote plugin**;
+  - a folder or `.zip`/`.tar` (file, URL, or dropped on the page) is copied in
+    as a **local plugin**.
 
-  To keep a folder in the repository without installing it everywhere, add it
-  to `exclude` in `packages.json`.
+  It pushes with the bb machine's own git login. You can also add a local
+  plugin by uploading its folder into `plugins/` on GitHub, or with
+  `scripts/add-plugin.sh <folder | .zip>`. `bb hub plugin remove <repo>` stops
+  pointing to a remote plugin. Delete a local plugin's folder (or add it to
+  `exclude`) to stop installing it.
 - **Add a marketplace plugin for everyone:** `bb hub marketplace search <words>`,
   then `bb hub marketplace add <id>@<marketplace>` (or **Search** and **Add for
   everyone** on the Plugin hub page). `bb hub marketplace remove <id>` takes
   it off the list. Machines keep it installed but stop managing it.
-- **Ship an update:** push changes to a plugin's folder. Every running hub
-  picks them up at the next shared sync (every 15 minutes, at `:00`, `:15`,
-  `:30`, `:45` UTC). Only plugins whose folder changed are updated.
+- **Ship an update:** push to the plugin (its folder here, or its own
+  repository for a remote plugin). Every running hub picks it up at the next
+  shared sync (every 15 minutes, at `:00`, `:15`, `:30`, `:45` UTC). Only
+  plugins whose folder changed are updated.
