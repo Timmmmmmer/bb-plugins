@@ -6,5 +6,10 @@
   ],
   "exclude": [],
   "plugins": [],
-  "marketplace": []
+  "marketplace": [
+    {
+      "id": "bb-sidebar",
+      "marketplace": "bb-community"
+    }
+  ]
 }
