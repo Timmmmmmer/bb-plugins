@@ -254,7 +254,29 @@ export const rpcContract = defineRpcContract({
       repo: z.string(),
       folders: z.array(folderSchema),
       packages: z.array(packageViewSchema),
-      marketplace: z.array(z.object({ label: z.string(), entry: z.string() })),
+      marketplace: z.array(z.object({
+        label: z.string(),
+        entry: z.string(),
+        /** Details for the info panel, from bb's catalog; null when the entry can't be found. */
+        info: z
+          .object({
+            name: z.string(),
+            pluginId: z.string(),
+            description: z.string(),
+            marketplace: z.string(),
+            publisher: z.string(),
+            category: z.string().nullable(),
+            installs: z.number().nullable(),
+            compatible: z.boolean(),
+            incompatibleReason: z.string().nullable(),
+            source: z.string(),
+            repositoryUrl: z.string().nullable(),
+            installedVersion: z.string().nullable(),
+            installedFrom: z.string().nullable(),
+            enabled: z.boolean().nullable(),
+          })
+          .nullable(),
+      })),
       lastSync: syncReportSchema.nullable(),
       schedule: scheduleSchema,
       hubVersion: z.string().nullable(),
@@ -1049,10 +1071,38 @@ export default async function plugin(bb: BbPluginApi) {
           };
         }),
       ),
-      marketplace: packages.marketplace.map((entry) => ({
-        label: marketplaceLabel(entry),
-        entry: `${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}`,
-      })),
+      marketplace: await Promise.all(
+        packages.marketplace.map(async (entry) => {
+          const found = await bb.sdk.plugins.catalog
+            .search({ query: entry.id })
+            .then((response) => response.results.find((result) => result.entryId === entry.id && (entry.marketplace === null || result.marketplace === entry.marketplace)))
+            .catch(() => undefined);
+          const plugin = found === undefined ? undefined : installedPlugins.find((item) => item.id === found.pluginId);
+          return {
+            label: marketplaceLabel(entry),
+            entry: `${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}`,
+            info:
+              found === undefined
+                ? null
+                : {
+                    name: found.displayName,
+                    pluginId: found.pluginId,
+                    description: found.description,
+                    marketplace: found.marketplaceDisplayName,
+                    publisher: found.publisherLabel,
+                    category: found.category ?? null,
+                    installs: found.installs ?? null,
+                    compatible: found.compatible,
+                    incompatibleReason: found.incompatibleReason,
+                    source: found.source,
+                    repositoryUrl: found.repositoryUrl ?? null,
+                    installedVersion: plugin?.version ?? null,
+                    installedFrom: plugin?.sourceDisplay ?? null,
+                    enabled: plugin?.enabled ?? null,
+                  },
+          };
+        }),
+      ),
     };
   }
 

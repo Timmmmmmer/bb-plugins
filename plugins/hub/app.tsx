@@ -17,10 +17,30 @@ type HubData = {
   repo: string;
   folders: PluginFolder[];
   packages: PackageView[];
-  marketplace: { label: string; entry: string }[];
+  marketplace: MarketplaceView[];
   lastSync: SyncReport | null;
   schedule: Schedule;
   hubVersion: string | null;
+};
+type MarketplaceView = {
+  label: string;
+  entry: string;
+  info: {
+    name: string;
+    pluginId: string;
+    description: string;
+    marketplace: string;
+    publisher: string;
+    category: string | null;
+    installs: number | null;
+    compatible: boolean;
+    incompatibleReason: string | null;
+    source: string;
+    repositoryUrl: string | null;
+    installedVersion: string | null;
+    installedFrom: string | null;
+    enabled: boolean | null;
+  } | null;
 };
 
 const PROBLEM: SyncResult["outcome"][] = ["failed", "other-source"];
@@ -55,27 +75,70 @@ function Row({
     <li className="text-sm">
       <div className="flex items-center gap-2 px-3 py-1.5" title={result?.detail ?? undefined}>
         {icon}
-        <span className="min-w-0 flex-1 truncate">{name}</span>
+        <span className="flex min-w-0 flex-1 items-center gap-0.5">
+          <span className="min-w-0 truncate">{name}</span>
+          {details === undefined ? null : (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
+              aria-label={`About ${name}`}
+              aria-expanded={open}
+              onClick={() => setOpen((value) => !value)}
+            >
+              <Icon name={open ? "ChevronUp" : "Info"} className="size-3.5" />
+            </Button>
+          )}
+        </span>
         <span className={cn("shrink-0 text-xs", result !== null && PROBLEM.includes(result.outcome) ? "text-destructive" : "text-muted-foreground")}>
           {status}
         </span>
         {action}
-        {details === undefined ? null : (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6 text-muted-foreground hover:text-foreground"
-            aria-label={`About ${name}`}
-            aria-expanded={open}
-            onClick={() => setOpen((value) => !value)}
-          >
-            <Icon name={open ? "ChevronUp" : "Info"} className="size-3.5" />
-          </Button>
-        )}
       </div>
       {open && details !== undefined ? <div className="border-t border-border bg-muted/40 px-3 py-2 text-xs">{details}</div> : null}
     </li>
   );
+}
+
+function InfoLines({ description, lines, link }: { description: string | null; lines: [string, ReactNode][]; link: string | null }) {
+  return (
+    <div>
+      {description ? <p className="mb-1.5 text-foreground">{description}</p> : null}
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+        {lines.map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="min-w-0 break-words">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {link === null ? null : (
+        <a href={link} target="_blank" rel="noreferrer" className="mt-1.5 inline-flex items-center gap-1 text-foreground underline underline-offset-2">
+          <Icon name="ExternalLink" className="size-3" />
+          View source
+        </a>
+      )}
+    </div>
+  );
+}
+
+function MarketplaceDetails({ item, result }: { item: MarketplaceView; result: SyncResult | null }) {
+  const info = item.info;
+  if (info === null) return <p className="text-muted-foreground">This entry wasn't found in bb's marketplaces on this machine.</p>;
+  const lines: [string, ReactNode][] = [
+    ["Type", "Marketplace plugin (installed through bb's marketplace)"],
+    ["Entry", <code key="entry">{item.entry}</code>],
+    ["Plugin id", <code key="id">{info.pluginId}</code>],
+    ["Marketplace", info.marketplace],
+    ["Publisher", info.publisher],
+  ];
+  if (info.category) lines.push(["Category", info.category]);
+  if (info.installs !== null) lines.push(["Installs", info.installs.toLocaleString()]);
+  lines.push(["Installed", info.installedVersion === null ? "not installed here" : `${info.installedVersion}${info.enabled === false ? " (disabled)" : ""}`]);
+  if (info.installedFrom) lines.push(["Installed from", info.installedFrom]);
+  if (!info.compatible) lines.push(["Compatibility", info.incompatibleReason ?? "not compatible with this bb"]);
+  if (result?.detail) lines.push(["Last sync", `${result.outcome}: ${result.detail}`]);
+  return <InfoLines description={info.description} lines={lines} link={info.repositoryUrl} />;
 }
 
 /** Label/value lines for a plugin's info panel. */
@@ -91,23 +154,7 @@ function Details({ entry, result }: { entry: PackageView; result: SyncResult | n
   ];
   if (info.updatedAt !== null) lines.push(["Last updated", new Date(info.updatedAt).toLocaleString()]);
   if (result?.detail) lines.push(["Last sync", `${result.outcome}: ${result.detail}`]);
-  return (
-    <div>
-      {info.description ? <p className="mb-1.5 text-foreground">{info.description}</p> : null}
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
-        {lines.map(([label, value]) => (
-          <div key={label} className="contents">
-            <dt className="text-muted-foreground">{label}</dt>
-            <dd className="min-w-0 break-words">{value}</dd>
-          </div>
-        ))}
-      </dl>
-      <a href={info.webUrl} target="_blank" rel="noreferrer" className="mt-1.5 inline-flex items-center gap-1 text-foreground underline underline-offset-2">
-        <Icon name="ExternalLink" className="size-3" />
-        View source
-      </a>
-    </div>
-  );
+  return <InfoLines description={info.description} lines={lines} link={info.webUrl} />;
 }
 
 function Empty({ children }: { children: ReactNode }) {
@@ -179,8 +226,9 @@ function MarketplacePlugins({ data, busy, rpc, run }: { data: HubData; busy: str
           {data.marketplace.map((item) => (
             <Row
               key={item.entry}
-              name={item.entry}
+              name={item.info?.name ?? item.entry}
               result={resultFor(item.label)}
+              details={<MarketplaceDetails item={item} result={resultFor(item.label)} />}
               action={
                 <Button
                   variant="ghost"
