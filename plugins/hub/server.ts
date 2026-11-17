@@ -1439,7 +1439,10 @@ export default async function plugin(bb: BbPluginApi) {
               stdout: results.length === 0
                 ? "No matches."
                 : results
-                    .map((result) => `${result.entry}${result.installed ? " [installed]" : ""}${result.compatible ? "" : " [incompatible]"} — ${result.displayName}: ${result.description}`)
+                    .map((result) => {
+                      const description = result.description.length > 90 ? `${result.description.slice(0, 89)}…` : result.description;
+                      return `${result.entry}${result.installed ? " [installed]" : ""}${result.compatible ? "" : " [incompatible]"} — ${result.displayName}: ${description}`;
+                    })
                     .join("\n"),
             };
           },
