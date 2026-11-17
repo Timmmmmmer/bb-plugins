@@ -42,7 +42,7 @@
     {
       "id": "server-badge",
       "displayName": "Server Badge",
-      "description": "Shows which bb server this window is connected to, in a small badge in the corner.",
+      "description": "Shows whether this window is on the Development or Production bb server, and which one, in a small badge in the corner.",
       "icon": "Server",
       "author": {
         "name": "Timmmmmmer",
