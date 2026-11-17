@@ -35,17 +35,78 @@ function List({ children }: { children: ReactNode }) {
 }
 
 /** One concise row: name, status, optional action. Details show on hover. */
-function Row({ name, result, action, icon }: { name: string; result: SyncResult | null; action?: ReactNode; icon?: ReactNode }) {
+function Row({
+  name,
+  result,
+  action,
+  icon,
+  details,
+}: {
+  name: string;
+  result: SyncResult | null;
+  action?: ReactNode;
+  icon?: ReactNode;
+  /** Shown in a panel that drops down under the row from the info button. */
+  details?: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
   const status = result === null ? "pending" : result.outcome === "current" ? "up to date" : result.outcome;
   return (
-    <li className="flex items-center gap-2 px-3 py-1.5 text-sm" title={result?.detail ?? undefined}>
-      {icon}
-      <span className="min-w-0 flex-1 truncate">{name}</span>
-      <span className={cn("shrink-0 text-xs", result !== null && PROBLEM.includes(result.outcome) ? "text-destructive" : "text-muted-foreground")}>
-        {status}
-      </span>
-      {action}
+    <li className="text-sm">
+      <div className="flex items-center gap-2 px-3 py-1.5" title={result?.detail ?? undefined}>
+        {icon}
+        <span className="min-w-0 flex-1 truncate">{name}</span>
+        <span className={cn("shrink-0 text-xs", result !== null && PROBLEM.includes(result.outcome) ? "text-destructive" : "text-muted-foreground")}>
+          {status}
+        </span>
+        {action}
+        {details === undefined ? null : (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground hover:text-foreground"
+            aria-label={`About ${name}`}
+            aria-expanded={open}
+            onClick={() => setOpen((value) => !value)}
+          >
+            <Icon name={open ? "ChevronUp" : "Info"} className="size-3.5" />
+          </Button>
+        )}
+      </div>
+      {open && details !== undefined ? <div className="border-t border-border bg-muted/40 px-3 py-2 text-xs">{details}</div> : null}
     </li>
+  );
+}
+
+/** Label/value lines for a plugin's info panel. */
+function Details({ entry, result }: { entry: PackageView; result: SyncResult | null }) {
+  const info = entry.info;
+  if (info === null) return <p className="text-muted-foreground">Couldn't read this plugin's details from its repository.</p>;
+  const lines: [string, ReactNode][] = [
+    ["Type", entry.kind === "remote" ? "Remote plugin (installed from its own repository)" : "Local plugin (a folder in the shared repository)"],
+    ["Plugin id", <code key="id">{info.pluginId}</code>],
+    ["Location", <code key="loc">{entry.kind === "local" ? entry.path : `${entry.repo}${entry.path ? `/${entry.path}` : ""}${entry.ref ? `@${entry.ref}` : ""}`}</code>],
+    ["Installed", info.installedVersion === null ? "not installed here" : `${info.installedVersion}${info.enabled === false ? " (disabled)" : ""}`],
+    ["Latest", info.latestVersion ?? "unknown"],
+  ];
+  if (info.updatedAt !== null) lines.push(["Last updated", new Date(info.updatedAt).toLocaleString()]);
+  if (result?.detail) lines.push(["Last sync", `${result.outcome}: ${result.detail}`]);
+  return (
+    <div>
+      {info.description ? <p className="mb-1.5 text-foreground">{info.description}</p> : null}
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+        {lines.map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="min-w-0 break-words">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <a href={info.webUrl} target="_blank" rel="noreferrer" className="mt-1.5 inline-flex items-center gap-1 text-foreground underline underline-offset-2">
+        <Icon name="ExternalLink" className="size-3" />
+        View source
+      </a>
+    </div>
   );
 }
 
@@ -58,8 +119,7 @@ function Empty({ children }: { children: ReactNode }) {
 
 /** Local (folders in the shared repo) and remote (other public repos) plugins, in one list. */
 function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
-  const nameFor = (entry: PackageView) =>
-    entry.kind === "local" ? data.folders.find((folder) => folder.path === entry.path)?.name ?? entry.label : entry.label;
+  const nameFor = (entry: PackageView) => entry.info?.name ?? entry.label;
   const resultFor = (label: string) => data.lastSync?.results.find((result) => result.repo === label) ?? null;
   return (
     <>
@@ -73,6 +133,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
               key={entry.label}
               name={nameFor(entry)}
               result={resultFor(entry.label)}
+              details={<Details entry={entry} result={resultFor(entry.label)} />}
               icon={
                 <span title={entry.kind === "remote" ? "remote plugin" : "local plugin"} className="shrink-0 text-muted-foreground">
                   <Icon name={entry.kind === "remote" ? "Link" : "Folder"} className="size-3.5" />

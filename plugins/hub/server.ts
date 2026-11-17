@@ -230,6 +230,20 @@ const packageViewSchema = z.object({
   ref: z.string().nullable(),
   /** local: a folder in the shared repository; remote: another public repository. */
   kind: z.enum(["local", "remote"]),
+  /** Details for the info panel; null when the plugin's manifest can't be read. */
+  info: z
+    .object({
+      name: z.string(),
+      pluginId: z.string(),
+      description: z.string().nullable(),
+      latestVersion: z.string().nullable(),
+      installedVersion: z.string().nullable(),
+      installedFrom: z.string().nullable(),
+      updatedAt: z.string().nullable(),
+      enabled: z.boolean().nullable(),
+      webUrl: z.string(),
+    })
+    .nullable(),
 });
 export type PackageView = z.infer<typeof packageViewSchema>;
 
@@ -320,6 +334,7 @@ export const rpcContract = defineRpcContract({
 
 const packageJsonSchema = z.object({
   name: z.string().min(1),
+  version: z.string().optional(),
   bb: z.object({ name: z.string().optional(), description: z.string().optional() }).optional(),
 });
 
@@ -976,7 +991,8 @@ export default async function plugin(bb: BbPluginApi) {
     });
     const dir = await syncMirror(packages.packagesRepo);
     const tree = await git(["ls-tree", "-d", "--name-only", `HEAD:${PLUGINS_FOLDER}`], dir).catch(() => "");
-    const installed = new Map((await bb.sdk.plugins.list()).plugins.map((entry) => [entry.id, entry.version]));
+    const installedPlugins = (await bb.sdk.plugins.list()).plugins;
+    const installed = new Map(installedPlugins.map((entry) => [entry.id, entry.version]));
     const packageFolders = new Set(
       packages.specs.filter((spec) => repoKey(spec) === repoKey(packages.packagesRepo)).map((spec) => spec.path),
     );
@@ -999,13 +1015,40 @@ export default async function plugin(bb: BbPluginApi) {
     return {
       repo: repoDisplay(packages.packagesRepo),
       folders,
-      packages: packages.specs.map((spec) => ({
-        label: labelFor(spec, packages.packagesRepo),
-        path: spec.path,
-        repo: repoDisplay(spec),
-        ref: spec.ref,
-        kind: isLocal(spec, packages.packagesRepo) ? ("local" as const) : ("remote" as const),
-      })),
+      packages: await Promise.all(
+        packages.specs.map(async (spec) => {
+          const manifest = await syncMirror(spec)
+            .then((mirror) => readPackageJson(mirror, spec.path))
+            .catch(() => null);
+          const pluginId = manifest === null ? null : pluginIdForPackageName(manifest.name);
+          const plugin = pluginId === null ? undefined : installedPlugins.find((entry) => entry.id === pluginId);
+          const web = spec.url.replace(/\.git$/u, "");
+          const webUrl = web.startsWith("https://github.com/")
+            ? `${web}/tree/${spec.ref ?? "HEAD"}${spec.path ? `/${spec.path}` : ""}`
+            : web;
+          return {
+            label: labelFor(spec, packages.packagesRepo),
+            path: spec.path,
+            repo: repoDisplay(spec),
+            ref: spec.ref,
+            kind: isLocal(spec, packages.packagesRepo) ? ("local" as const) : ("remote" as const),
+            info:
+              manifest === null || pluginId === null
+                ? null
+                : {
+                    name: manifest.bb?.name ?? pluginId,
+                    pluginId,
+                    description: manifest.bb?.description ?? null,
+                    latestVersion: manifest.version ?? null,
+                    installedVersion: plugin?.version ?? null,
+                    installedFrom: plugin?.sourceDisplay ?? null,
+                    updatedAt: plugin?.updatedAt ?? null,
+                    enabled: plugin?.enabled ?? null,
+                    webUrl,
+                  },
+          };
+        }),
+      ),
       marketplace: packages.marketplace.map((entry) => ({
         label: marketplaceLabel(entry),
         entry: `${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}`,
