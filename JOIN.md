@@ -72,6 +72,13 @@ starts.
   `.env`), check it, commit, and push with the git login of the machine
   running bb (run `gh auth setup-git` there if pushing fails). Every running
   hub installs it at the next sync.
+- **Add a plugin from bb's marketplaces** (bb-community, bb-official, or a
+  third-party one): `bb hub marketplace search <words>`, then
+  `bb hub marketplace add <id>@<marketplace>`. The Plugin hub page has the
+  same search with **Add for everyone**. Every hub installs it through bb's
+  own catalog and keeps it updated. A third-party marketplace is registered
+  automatically on machines that don't have it. `bb hub marketplace remove <id>`
+  takes it off the list (it stays installed).
 - **Stop installing one:** delete its folder, or add it to `exclude` in
   `packages.json`, and push. Machines keep the plugin installed but stop
   updating it.

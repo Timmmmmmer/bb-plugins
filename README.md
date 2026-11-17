@@ -31,6 +31,10 @@ The repository is public, so nothing needs a GitHub token.
 
   To keep a folder in the repository without installing it everywhere, add it
   to `exclude` in `packages.json`.
+- **Add a marketplace plugin for everyone:** `bb hub marketplace search <words>`,
+  then `bb hub marketplace add <id>@<marketplace>` (or **Search** and **Add for
+  everyone** on the Plugin hub page). `bb hub marketplace remove <id>` takes
+  it off the list. Machines keep it installed but stop managing it.
 - **Ship an update:** push changes to a plugin's folder. Every running hub
   picks them up at the next shared sync (every 15 minutes, at `:00`, `:15`,
   `:30`, `:45` UTC). Only plugins whose folder changed are updated.

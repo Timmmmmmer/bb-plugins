@@ -18,6 +18,10 @@ bb hub packages [--json]    # what packages.json lists
 bb hub list [--json]        # every plugin folder in the repo, installed or not
 bb hub install <folder>     # e.g. bb hub install hello (or plugins/hello); updates if installed
 bb hub adopt <folder>       # switch a plugin installed elsewhere; DELETES its settings and data, so confirm first
+bb hub marketplace [--json]                   # marketplace plugins every hub installs
+bb hub marketplace search <words> [--json]    # find entries in bb's marketplaces
+bb hub marketplace add <id>[@<marketplace>]   # add to packages.json for everyone (commits + pushes)
+bb hub marketplace remove <id>[@<marketplace>] # take it off the list (machines keep it installed)
 bb hub plugin add <source> [--name <folder>] [--subdir <path>] [--force] [--json]
                             # add a plugin to the shared repo from a git URL, a folder, or a .zip/.tar file or URL
 ```
@@ -81,3 +85,26 @@ plugin ids, then commits and pushes. Uploading the folder on GitHub works too.
 The hub keeps a git mirror of the repository in the `mirrorsDir` setting, or
 else the first writable of bb's data dir (`plugins/hub/mirrors`),
 `~/.cache/bb-plugin-hub/mirrors`, and the temp folder. `bb hub status` shows it.
+
+## Marketplace plugins
+
+`packages.json` has a separate `marketplace` list for plugins from bb's
+marketplaces:
+
+```json
+"marketplace": [
+  { "id": "thread-hover-cards", "marketplace": "bb-community" },
+  { "id": "notes", "marketplace": "acme-plugins", "source": "git:github.com/acme/bb-marketplace@main" }
+]
+```
+
+On every sync each entry is resolved with bb's catalog (`installPlan`) and,
+when missing, installed with `catalog.install` and the exact resolved source.
+When installed, bb's update check runs and available updates are applied. A
+third-party marketplace with a recorded `source` is added on machines that
+don't have it. `bb hub marketplace add` validates the entry first, records
+the marketplace's source for third-party marketplaces, commits, pushes with
+the machine's git, and syncs. `remove` commits the removal; the plugin stays
+installed. Both publish to the shared repository and affect every member, so
+confirm with the user first. Results appear as `marketplace:<id>@<marketplace>`
+in `bb hub sync`.

@@ -74,7 +74,38 @@ const packagesFileSchema = z.object({
   /** Folders to leave out of `include`, e.g. "plugins/experimental". */
   exclude: z.array(z.string().trim().min(1)).max(200).optional(),
   plugins: z.array(packageEntrySchema).max(100).optional(),
+  /** Plugins from bb's marketplaces (bb-community, bb-official, or a third-party one). */
+  marketplace: z.array(z.object({
+    /** The catalog entry id, as in `bb plugin install <id>@<marketplace>`. */
+    id: z.string().trim().min(1),
+    /** The marketplace name; omitted means "the only marketplace that has it". */
+    marketplace: z.string().trim().min(1).optional(),
+    /** For a third-party marketplace: where to add it from on machines that don't have it. */
+    source: z.string().trim().min(1).optional(),
+    subdirectory: z.string().trim().min(1).optional(),
+  })).max(100).optional(),
 });
+
+const ENTRY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/iu;
+const MARKETPLACE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+const BUILT_IN_MARKETPLACES = new Set(["bb-official", "bb-community"]);
+interface MarketplaceSpec {
+  id: string;
+  marketplace: string | null;
+  source: string | null;
+  subdirectory: string | null;
+}
+const marketplaceLabel = (entry: { id: string; marketplace: string | null }) =>
+  `marketplace:${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}`;
+
+/** "thread-hover-cards" or "thread-hover-cards@bb-community". */
+function parseEntryArg(arg: string): { id: string; marketplace: string | null } {
+  const [id, marketplace, ...rest] = arg.trim().split("@");
+  if (id === undefined || !ENTRY_ID_PATTERN.test(id) || rest.length > 0 || (marketplace !== undefined && !MARKETPLACE_NAME_PATTERN.test(marketplace))) {
+    throw new Error(`"${arg}" is not a marketplace entry (expected <id> or <id>@<marketplace>).`);
+  }
+  return { id, marketplace: marketplace ?? null };
+}
 
 interface RepoRef {
   owner: string;
@@ -157,6 +188,7 @@ export const rpcContract = defineRpcContract({
       repo: z.string(),
       folders: z.array(folderSchema),
       packages: z.array(packageViewSchema),
+      marketplace: z.array(z.object({ label: z.string(), entry: z.string() })),
       lastSync: syncReportSchema.nullable(),
       schedule: scheduleSchema,
     }),
@@ -168,6 +200,35 @@ export const rpcContract = defineRpcContract({
   hub_sync: {
     input: z.null(),
     output: syncReportSchema,
+  },
+  hub_marketplace_search: {
+    input: z.object({ query: z.string().trim().min(1).max(200) }),
+    output: z.array(z.object({
+      entry: z.string(),
+      pluginId: z.string(),
+      displayName: z.string(),
+      description: z.string(),
+      marketplace: z.string(),
+      installed: z.boolean(),
+      compatible: z.boolean(),
+    })),
+  },
+  hub_marketplace_add: {
+    input: z.object({ entry: z.string().trim().min(1).max(200) }),
+    output: z.object({
+      entry: z.string(),
+      pluginId: z.string(),
+      displayName: z.string(),
+      commit: z.string().nullable(),
+      compatible: z.boolean(),
+      incompatibleReason: z.string().nullable(),
+      guaranteedBy: z.string(),
+      sync: syncResultSchema.nullable(),
+    }),
+  },
+  hub_marketplace_remove: {
+    input: z.object({ entry: z.string().trim().min(1).max(200) }),
+    output: z.object({ removed: z.array(z.string()), commit: z.string().nullable(), guaranteedBy: z.string() }),
   },
   hub_add_plugin: {
     input: z
@@ -426,7 +487,15 @@ export default async function plugin(bb: BbPluginApi) {
       await bb.storage.kv.set(SYNC_INTERVAL_KEY, intervalMinutes);
       bb.log.info(`sync interval is now ${intervalMinutes} min`);
     }
-    return { from: `${packagesRepo.owner}/${packagesRepo.name}/packages.json`, packagesRepo, specs, errors };
+    const marketplace: MarketplaceSpec[] = [];
+    for (const entry of file.marketplace ?? []) {
+      if (!ENTRY_ID_PATTERN.test(entry.id) || (entry.marketplace !== undefined && !MARKETPLACE_NAME_PATTERN.test(entry.marketplace))) {
+        errors.push(`Invalid marketplace entry "${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}".`);
+        continue;
+      }
+      marketplace.push({ id: entry.id, marketplace: entry.marketplace ?? null, source: entry.source ?? null, subdirectory: entry.subdirectory ?? null });
+    }
+    return { from: `${packagesRepo.owner}/${packagesRepo.name}/packages.json`, packagesRepo, specs, marketplace, errors };
   }
 
   const labelFor = (spec: PackageSpec, packagesRepo: RepoRef) =>
@@ -562,6 +631,149 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // -------------------------------------------------------------------------
+  // Marketplace plugins: installed through bb's own catalog (with bb's checks
+  // and its exact resolved source), then kept updated with bb's update check.
+
+  /** Register a third-party marketplace on this machine if it's missing. */
+  async function ensureMarketplace(entry: MarketplaceSpec): Promise<void> {
+    if (entry.marketplace === null || BUILT_IN_MARKETPLACES.has(entry.marketplace) || entry.source === null) return;
+    const known = await bb.sdk.plugins.marketplaces.list();
+    if (known.some((marketplace) => marketplace.name === entry.marketplace)) return;
+    const added = await bb.sdk.plugins.marketplaces.add({
+      source: entry.source,
+      ...(entry.subdirectory ? { subdirectory: entry.subdirectory } : {}),
+    });
+    bb.log.info(`added marketplace ${added.name} from ${entry.source}`);
+  }
+
+  async function syncMarketplaceEntry(entry: MarketplaceSpec): Promise<SyncResult> {
+    const label = marketplaceLabel(entry);
+    await ensureMarketplace(entry);
+    const plan = await bb.sdk.plugins.catalog.installPlan({
+      entryId: entry.id,
+      ...(entry.marketplace ? { marketplace: entry.marketplace } : {}),
+    });
+    const pluginId = plan.pluginId;
+    if (pluginId === bb.pluginId) {
+      return { repo: label, pluginId, outcome: "skipped", detail: "That is the hub itself.", version: null };
+    }
+    const installed = (await bb.sdk.plugins.list()).plugins.find((plugin) => plugin.id === pluginId);
+    if (installed === undefined) {
+      if (!plan.compatible) {
+        return { repo: label, pluginId, outcome: "failed", detail: plan.incompatibleReason ?? "Not compatible with this bb.", version: null };
+      }
+      const result = await bb.sdk.plugins.catalog.install({
+        entryId: entry.id,
+        ...(plan.kind === "marketplace"
+          ? { marketplace: plan.marketplace, confirmedSource: plan.resolvedSource }
+          : entry.marketplace
+            ? { marketplace: entry.marketplace }
+            : {}),
+      });
+      bb.log.info(`installed ${result.id}@${result.version} from ${label}`);
+      return { repo: label, pluginId, outcome: "installed", detail: null, version: result.version };
+    }
+    const elsewhere = installed.catalogEntryId !== entry.id ? `installed from ${installed.sourceDisplay}, not from the marketplace` : null;
+    const [check] = await bb.sdk.plugins.checkUpdates({ pluginId });
+    if (check === undefined || check.outcome === "current") {
+      return { repo: label, pluginId, outcome: "current", detail: elsewhere, version: installed.version };
+    }
+    if (check.outcome !== "update-available") {
+      return { repo: label, pluginId, outcome: check.outcome === "pinned" ? "pinned" : "skipped", detail: elsewhere ?? check.detail ?? check.outcome, version: installed.version };
+    }
+    const applied = await bb.sdk.plugins.applyUpdate({ pluginId });
+    if (applied.outcome === "rolled-back") {
+      return { repo: label, pluginId, outcome: "failed", detail: applied.detail ?? "bb rolled the update back.", version: applied.from.version };
+    }
+    bb.log.info(`updated ${pluginId} ${applied.from.display} -> ${applied.to?.display ?? "?"}`);
+    return {
+      repo: label,
+      pluginId,
+      outcome: applied.applied ? "updated" : "current",
+      detail: applied.applied ? `${applied.from.version} → ${applied.to?.version ?? "latest"}` : elsewhere,
+      version: applied.to?.version ?? applied.from.version,
+    };
+  }
+
+  /** Change packages.json in the shared repository with one commit, pushed with this machine's git. */
+  async function editPackagesJson(
+    mutate: (document: Record<string, unknown>) => Record<string, unknown>,
+    message: string,
+  ): Promise<string | null> {
+    const { packagesRepo } = await readConfig();
+    const work = await workingClone(packagesRepo);
+    const file = path.join(work, "packages.json");
+    const document = z.record(z.string(), z.unknown()).parse(JSON.parse(await readFile(file, "utf8")));
+    const next = mutate(document);
+    packagesFileSchema.parse(next);
+    await writeFile(file, `${JSON.stringify(next, null, 2)}\n`);
+    return commitAndPush(work, ["packages.json"], message, packagesRepo);
+  }
+
+  async function addMarketplacePlugin(arg: string) {
+    const wanted = parseEntryArg(arg);
+    const outcome = await serialize(async () => {
+      // Resolve it now, so a typo or an incompatible entry fails before any commit.
+      const plan = await bb.sdk.plugins.catalog.installPlan({
+        entryId: wanted.id,
+        ...(wanted.marketplace ? { marketplace: wanted.marketplace } : {}),
+      });
+      if (plan.pluginId === bb.pluginId) throw new Error("That is the hub itself.");
+      const marketplace = plan.kind === "marketplace" ? plan.marketplace : wanted.marketplace ?? "bb-official";
+      const entry: Record<string, string> = { id: plan.entryId, marketplace };
+      if (!BUILT_IN_MARKETPLACES.has(marketplace)) {
+        const known = (await bb.sdk.plugins.marketplaces.list()).find((item) => item.name === marketplace);
+        if (known !== undefined) {
+          entry.source = known.source;
+          if (known.subdirectory) entry.subdirectory = known.subdirectory;
+        }
+      }
+      const commit = await editPackagesJson((document) => {
+        const list = z.array(z.record(z.string(), z.unknown())).catch([]).parse(document.marketplace ?? []);
+        if (list.some((item) => item.id === entry.id && (item.marketplace ?? marketplace) === marketplace)) {
+          throw new Error(`${entry.id}@${marketplace} is already in packages.json.`);
+        }
+        return { ...document, marketplace: [...list, entry] };
+      }, `Add ${entry.id}@${marketplace} from the marketplace to hub packages`);
+      return { entry: `${entry.id}@${marketplace}`, pluginId: plan.pluginId, displayName: plan.displayName, commit, compatible: plan.compatible, incompatibleReason: plan.incompatibleReason };
+    });
+    const report = await requestSync("marketplace plugin added");
+    const sync = report.results.find((result) => result.pluginId === outcome.pluginId) ?? null;
+    bb.realtime.publish(HUB_CHANGED, { added: outcome.entry });
+    return { ...outcome, guaranteedBy: scheduleView(null).guaranteedBy, sync };
+  }
+
+  async function removeMarketplacePlugin(arg: string) {
+    const wanted = parseEntryArg(arg);
+    const outcome = await serialize(async () => {
+      let removed: string[] = [];
+      const commit = await editPackagesJson((document) => {
+        const list = z.array(z.record(z.string(), z.unknown())).catch([]).parse(document.marketplace ?? []);
+        const keep = list.filter((item) => !(item.id === wanted.id && (wanted.marketplace === null || item.marketplace === wanted.marketplace)));
+        removed = list.filter((item) => !keep.includes(item)).map((item) => `${String(item.id)}@${String(item.marketplace ?? "any")}`);
+        if (removed.length === 0) throw new Error(`${arg} is not in packages.json's marketplace list.`);
+        return { ...document, marketplace: keep };
+      }, `Remove ${arg} from the marketplace hub packages`);
+      return { removed, commit };
+    });
+    bb.realtime.publish(HUB_CHANGED, { removed: outcome.removed });
+    return { ...outcome, guaranteedBy: scheduleView(null).guaranteedBy };
+  }
+
+  async function searchMarketplace(query: string) {
+    const response = await bb.sdk.plugins.catalog.search({ query });
+    return response.results.slice(0, 50).map((result) => ({
+      entry: `${result.entryId}@${result.marketplace}`,
+      pluginId: result.pluginId,
+      displayName: result.displayName,
+      description: result.description,
+      marketplace: result.marketplaceDisplayName,
+      installed: result.installed,
+      compatible: result.compatible,
+    }));
+  }
+
+  // -------------------------------------------------------------------------
   // Sync
 
   async function runSync(trigger: string): Promise<SyncReport> {
@@ -594,6 +806,13 @@ export default async function plugin(bb: BbPluginApi) {
           results.push(await installOrUpdate(spec, label));
         } catch (cause) {
           results.push({ repo: label, pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null });
+        }
+      }
+      for (const entry of packages.marketplace) {
+        try {
+          results.push(await syncMarketplaceEntry(entry));
+        } catch (cause) {
+          results.push({ repo: marketplaceLabel(entry), pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null });
         }
       }
     } catch (cause) {
@@ -724,6 +943,10 @@ export default async function plugin(bb: BbPluginApi) {
         path: spec.path,
         repo: `${spec.owner}/${spec.name}`,
         ref: spec.ref,
+      })),
+      marketplace: packages.marketplace.map((entry) => ({
+        label: marketplaceLabel(entry),
+        entry: `${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}`,
       })),
     };
   }
@@ -935,6 +1158,33 @@ export default async function plugin(bb: BbPluginApi) {
     return dir;
   }
 
+  /** Commit `paths` in the working clone and push with this machine's credentials; null if nothing changed. */
+  async function commitAndPush(work: string, paths: string[], message: string, repo: RepoRef): Promise<string | null> {
+    await git(["add", "-A", "--", ...paths], work);
+    const staged = await git(["diff", "--cached", "--name-only", "--", ...paths], work);
+    if (staged.trim() === "") return null;
+    const identity = (await gitWithMachineCredentials(["config", "user.name"], work).catch(() => "")).trim()
+      ? []
+      : ["-c", "user.name=bb hub", "-c", "user.email=bb-hub@users.noreply.github.com"];
+    await git([...identity, "commit", "--quiet", "-m", message, "--", ...paths], work);
+    const pushFailed = (cause: unknown) =>
+      new Error(
+        `Pushing to ${repo.owner}/${repo.name} failed: ${errorMessage(cause)}. Changing the shared repository needs this machine's git to have write access to it (for example \`gh auth setup-git\`).`,
+      );
+    try {
+      await gitWithMachineCredentials(["push", "--quiet", "origin", "HEAD"], work);
+    } catch (first) {
+      // Someone pushed meanwhile: rebase once and retry.
+      await gitWithMachineCredentials(["pull", "--quiet", "--rebase", "origin", "HEAD"], work).catch(() => {
+        throw pushFailed(first);
+      });
+      await gitWithMachineCredentials(["push", "--quiet", "origin", "HEAD"], work).catch((cause) => {
+        throw pushFailed(cause);
+      });
+    }
+    return (await git(["rev-parse", "--short", "HEAD"], work)).trim();
+  }
+
   async function addPlugin(
     source: AddSource,
     options: { name?: string; subdir?: string; force?: boolean },
@@ -968,27 +1218,8 @@ export default async function plugin(bb: BbPluginApi) {
         if (!(await access(path.join(dest, ".gitignore")).then(() => true, () => false))) {
           await writeFile(path.join(dest, ".gitignore"), "node_modules/\ndist/\n");
         }
-        await git(["add", "-A", "--", folder], work);
-        const staged = await git(["diff", "--cached", "--name-only", "--", folder], work);
-        if (staged.trim() === "") return { folder, pluginId, commit: null, warning, unchanged: true };
-        const identity = (await gitWithMachineCredentials(["config", "user.name"], work).catch(() => "")).trim()
-          ? []
-          : ["-c", "user.name=bb hub", "-c", "user.email=bb-hub@users.noreply.github.com"];
-        await git([...identity, "commit", "--quiet", "-m", `Add plugin ${folderName} (from ${description})`, "--", folder], work);
-        try {
-          await gitWithMachineCredentials(["push", "--quiet", "origin", "HEAD"], work);
-        } catch (first) {
-          // Someone pushed meanwhile: rebase once and retry.
-          await gitWithMachineCredentials(["pull", "--quiet", "--rebase", "origin", "HEAD"], work).catch(() => {
-            throw first;
-          });
-          await gitWithMachineCredentials(["push", "--quiet", "origin", "HEAD"], work).catch((cause) => {
-            throw new Error(
-              `Pushing to ${packagesRepo.owner}/${packagesRepo.name} failed: ${errorMessage(cause)}. Adding plugins needs this machine's git to have write access to the repository (for example \`gh auth setup-git\`).`,
-            );
-          });
-        }
-        const commit = (await git(["rev-parse", "--short", "HEAD"], work)).trim();
+        const commit = await commitAndPush(work, [folder], `Add plugin ${folderName} (from ${description})`, packagesRepo);
+        if (commit === null) return { folder, pluginId, commit: null, warning, unchanged: true };
         bb.log.info(`added ${folder} (${pluginId}) from ${description} as ${commit}`);
         return { folder, pluginId, commit, warning, unchanged: false };
       } finally {
@@ -1069,6 +1300,18 @@ export default async function plugin(bb: BbPluginApi) {
     hub_sync: (_input, context) => {
       clientOnly(context, "hub_sync");
       return requestSync("manual");
+    },
+    hub_marketplace_search: ({ query }, context) => {
+      clientOnly(context, "hub_marketplace_search");
+      return searchMarketplace(query);
+    },
+    hub_marketplace_add: ({ entry }, context) => {
+      clientOnly(context, "hub_marketplace_add");
+      return addMarketplacePlugin(entry);
+    },
+    hub_marketplace_remove: ({ entry }, context) => {
+      clientOnly(context, "hub_marketplace_remove");
+      return removeMarketplacePlugin(entry);
     },
     hub_add_plugin: (input, context) => {
       clientOnly(context, "hub_add_plugin");
@@ -1162,6 +1405,78 @@ export default async function plugin(bb: BbPluginApi) {
             return {
               exitCode: report.results.some((result) => result.outcome === "failed") ? 1 : 0,
               stdout: options.json ? JSON.stringify(report) : [`Packages from ${report.packagesFrom}`, ...report.results.map(formatResult)].join("\n"),
+            };
+          },
+        }),
+        marketplace: cliCommand({
+          summary: "Show the marketplace plugins every hub keeps installed (packages.json \"marketplace\")",
+          options: jsonOption,
+          async run({ options }) {
+            const packages = await serialize(async () => {
+              fetchedThisRound.clear();
+              return loadPackages();
+            }).catch((cause) => { throw toCliError(cause); });
+            const entries = packages.marketplace.map((entry) => `${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}`);
+            return {
+              exitCode: 0,
+              stdout: options.json
+                ? JSON.stringify(entries)
+                : entries.length === 0
+                  ? "No marketplace plugins. Find one with `bb hub marketplace search <query>`, then `bb hub marketplace add <entry>`."
+                  : entries.join("\n"),
+            };
+          },
+        }),
+        "marketplace search": cliCommand({
+          summary: "Search bb's marketplaces for a plugin to add",
+          positionals: [{ name: "query", description: "Words to search for (name, description, category, tag)", required: true, variadic: true }],
+          options: jsonOption,
+          async run({ positionals, options }) {
+            const results = await searchMarketplace(positionals.query.join(" ")).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(results) };
+            return {
+              exitCode: 0,
+              stdout: results.length === 0
+                ? "No matches."
+                : results
+                    .map((result) => `${result.entry}${result.installed ? " [installed]" : ""}${result.compatible ? "" : " [incompatible]"} — ${result.displayName}: ${result.description}`)
+                    .join("\n"),
+            };
+          },
+        }),
+        "marketplace add": cliCommand({
+          summary: "Add a marketplace plugin to packages.json (commits and pushes) so every hub installs it",
+          description: "Pushes with the git credentials of the machine running bb. Use the entry from `bb hub marketplace search`.",
+          positionals: [{ name: "entry", description: "<id> or <id>@<marketplace>, e.g. thread-hover-cards@bb-community", required: true }],
+          options: jsonOption,
+          async run({ positionals, options }) {
+            const added = await addMarketplacePlugin(positionals.entry).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(added) };
+            return {
+              exitCode: added.sync?.outcome === "failed" ? 1 : 0,
+              stdout: [
+                `Added ${added.entry} (${added.displayName}) to packages.json${added.commit ? ` and pushed commit ${added.commit}` : ""}.`,
+                ...(added.compatible ? [] : [`Note: not compatible with this bb: ${added.incompatibleReason ?? "unknown reason"}.`]),
+                ...(added.sync ? [`This machine: ${formatResult(added.sync)}`] : []),
+                `Every running hub has it by ${formatTime(added.guaranteedBy)}; hubs that are off get it when they start.`,
+              ].join("\n"),
+            };
+          },
+        }),
+        "marketplace remove": cliCommand({
+          summary: "Remove a marketplace plugin from packages.json (commits and pushes); machines keep it installed",
+          positionals: [{ name: "entry", description: "<id> or <id>@<marketplace>", required: true }],
+          options: jsonOption,
+          async run({ positionals, options }) {
+            const removed = await removeMarketplacePlugin(positionals.entry).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(removed) };
+            return {
+              exitCode: 0,
+              stdout: [
+                `Removed ${removed.removed.join(", ")} from packages.json${removed.commit ? ` (commit ${removed.commit})` : ""}.`,
+                "Machines keep it installed but stop updating it; uninstall it with `bb plugin remove <id>` where it's no longer wanted.",
+                `Every running hub stops managing it by ${formatTime(removed.guaranteedBy)}.`,
+              ].join("\n"),
             };
           },
         }),

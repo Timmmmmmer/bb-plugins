@@ -174,7 +174,8 @@ function PackagesSection({ packages, lastSync }: { packages: PackageView[]; last
   const labels = packages.map((entry) => entry.label);
   const resultFor = (label: string) => lastSync?.results.find((result) => result.repo === label) ?? null;
   const self = lastSync?.results.find((result) => result.repo === "hub (self)") ?? null;
-  const general = lastSync?.results.filter((result) => !labels.includes(result.repo) && result !== self) ?? [];
+  const general =
+    lastSync?.results.filter((result) => !labels.includes(result.repo) && result !== self && !result.repo.startsWith("marketplace:")) ?? [];
   return (
     <>
       <SectionTitle>Packages (packages.json)</SectionTitle>
@@ -218,12 +219,135 @@ function PackagesSection({ packages, lastSync }: { packages: PackageView[]; last
   );
 }
 
+type SearchResult = {
+  entry: string;
+  pluginId: string;
+  displayName: string;
+  description: string;
+  marketplace: string;
+  installed: boolean;
+  compatible: boolean;
+};
+
+function MarketplaceSection({
+  entries,
+  lastSync,
+  busy,
+  rpc,
+  run,
+}: {
+  entries: { label: string; entry: string }[];
+  lastSync: SyncReport | null;
+  busy: string | null;
+  rpc: ReturnType<typeof useRpc<typeof rpcContract>>;
+  run: (key: string, action: () => Promise<unknown>) => Promise<void>;
+}) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResult[] | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const listed = new Set(entries.map((item) => item.entry));
+  const resultFor = (label: string) => lastSync?.results.find((result) => result.repo === label) ?? null;
+  const at = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  return (
+    <>
+      <SectionTitle>Marketplace plugins</SectionTitle>
+      <form
+        className="flex items-center gap-2"
+        onSubmit={(event: FormEvent<HTMLFormElement>) => {
+          event.preventDefault();
+          if (query.trim() === "") return;
+          void run("search", async () => setResults(await rpc.call("hub_marketplace_search", { query: query.trim() })));
+        }}
+      >
+        <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search bb's marketplaces" aria-label="Search marketplaces" />
+        <Button type="submit" variant="outline" disabled={busy !== null || query.trim() === ""}>
+          <Icon name="Search" className="size-4" />
+          {busy === "search" ? "Searching…" : "Search"}
+        </Button>
+      </form>
+      {message === null ? null : <p className="mt-2 text-xs">{message}</p>}
+      {results === null ? null : results.length === 0 ? (
+        <p className="mt-2 text-xs text-muted-foreground">No matches.</p>
+      ) : (
+        <ul className="mt-2 divide-y divide-border overflow-hidden rounded-lg border border-border bg-card px-4">
+          {results.map((result) => (
+            <li key={result.entry} className="flex items-center gap-3 py-2 text-sm">
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium">
+                  {result.displayName}
+                  <span className="ml-2 text-xs text-muted-foreground">{result.entry}</span>
+                </div>
+                <div className="truncate text-xs text-muted-foreground">{result.description}</div>
+              </div>
+              {listed.has(result.entry) ? (
+                <span className="text-xs text-muted-foreground">in packages</span>
+              ) : (
+                <Button
+                  size="sm"
+                  disabled={busy !== null || !result.compatible}
+                  onClick={() =>
+                    void run(`madd:${result.entry}`, async () => {
+                      const added = await rpc.call("hub_marketplace_add", { entry: result.entry });
+                      setMessage(`Added ${added.entry}${added.commit ? ` (commit ${added.commit})` : ""}. Every running hub has it by ${at(added.guaranteedBy)}.`);
+                    })
+                  }
+                >
+                  {busy === `madd:${result.entry}` ? "Adding…" : result.compatible ? "Add for everyone" : "Incompatible"}
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="mt-3">
+        {entries.length === 0 ? (
+          <EmptyState>No marketplace plugins yet. Search above and add one for everyone.</EmptyState>
+        ) : (
+          <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card px-4">
+            {entries.map((item) => {
+              const result = resultFor(item.label);
+              return (
+                <li key={item.entry} className="py-2.5 text-sm">
+                  <div className="flex items-center gap-3">
+                    <span className="min-w-0 flex-1 truncate font-medium">{item.entry}</span>
+                    <span className={cn("text-xs", result !== null && PROBLEM.includes(result.outcome) ? "text-destructive" : "text-muted-foreground")}>
+                      {result === null ? "not synced yet" : `${result.outcome}${result.version ? ` · ${result.version.slice(0, 12)}` : ""}`}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7 text-muted-foreground hover:text-foreground"
+                      aria-label={`Remove ${item.entry} from packages`}
+                      disabled={busy !== null}
+                      onClick={() =>
+                        void run(`mremove:${item.entry}`, async () => {
+                          const removed = await rpc.call("hub_marketplace_remove", { entry: item.entry });
+                          setMessage(`Removed ${removed.removed.join(", ")}. Machines keep it installed but stop updating it.`);
+                        })
+                      }
+                    >
+                      <Icon name="Trash2" className="size-4" />
+                    </Button>
+                  </div>
+                  {result?.detail ? <p className="mt-1 text-xs text-muted-foreground">{result.detail}</p> : null}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </>
+  );
+}
+
 function HubPage() {
   const rpc = useRpc<typeof rpcContract>();
   const [data, setData] = useState<{
     repo: string;
     folders: PluginFolder[];
     packages: PackageView[];
+    marketplace: { label: string; entry: string }[];
     lastSync: SyncReport | null;
     schedule: Schedule;
   } | null>(null);
@@ -286,6 +410,7 @@ function HubPage() {
               }}
             />
             <PackagesSection packages={data.packages} lastSync={data.lastSync} />
+            <MarketplaceSection entries={data.marketplace} lastSync={data.lastSync} busy={busy} rpc={rpc} run={run} />
             <SectionTitle>Plugin folders in {data.repo}</SectionTitle>
             {data.folders.length === 0 ? (
               <EmptyState>No plugin folders found.</EmptyState>
