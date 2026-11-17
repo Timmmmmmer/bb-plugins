@@ -1463,7 +1463,9 @@ export default async function plugin(bb: BbPluginApi) {
           signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
         });
         if (signal.aborted) break;
-        await requestSync("schedule").catch((cause) => bb.log.error(`scheduled sync failed: ${errorMessage(cause)}`));
+        // Don't wait for the sync: a sync can't be cancelled, and the service
+        // must stop promptly when the hub reloads (e.g. for a self-update).
+        syncInBackground("schedule");
       }
     },
   });
