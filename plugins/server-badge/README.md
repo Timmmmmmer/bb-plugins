@@ -1,13 +1,10 @@
 # bb-plugin-server-badge
 
-Shows which bb server a window is connected to, and whether it is
-**Development**, **Production**, or **Local**, as a small badge in the
-bottom-right corner (red for Production, green for Development). Hover it for
-the host, user, port, app URL, and why it chose that environment. Agents and
-shells can run `bb server-badge` for the same information.
-
-The name is the hostname of the server's `BB_APP_URL` (for example
-`bb.example.com`), or `user@host:port` when it has none.
+Shows whether a window is connected to the **Development** or **Production**
+bb server, as a small badge in the bottom-right corner. On a personal machine
+(no public app URL) it shows `user:machine:port` instead. Hover it for the
+server's name, host, user, port, app URL, and why it chose that environment.
+Agents and shells can run `bb server-badge` for the same information.
 
 ## How the environment is decided
 

@@ -17,5 +17,6 @@ Development, otherwise Production). A server without an app URL is Local. It
 never looks at the URL itself. Override it with
 `bb plugin config server-badge set environment development|production|auto`.
 
-The same information is shown in bb's UI as a small badge in the bottom-right
-corner (red for Production, green for Development); hover it for details.
+bb's UI shows a small badge in the bottom-right corner: `Development`,
+`Production`, or `user:machine:port` on a personal machine. Hover it for
+details.
