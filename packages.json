@@ -1,0 +1,8 @@
+{
+  "$comment": "Plugins every hub keeps installed and up to date. path is a plugin folder in this repository; optional repo (another public owner/name) and ref (branch, tag, or semver:[prefix:]range). syncIntervalMinutes (5-1440) is the shared sync interval: every hub syncs at the same UTC-aligned times. Edit this file and push; every running hub picks it up at the next sync.",
+  "syncIntervalMinutes": 15,
+  "plugins": [
+    { "path": "plugins/hello" },
+    { "path": "plugins/sidebar-text" }
+  ]
+}
