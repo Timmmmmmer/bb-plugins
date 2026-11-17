@@ -66,7 +66,11 @@ const packageEntrySchema = z.object({
 });
 const packagesFileSchema = z.object({
   syncIntervalMinutes: z.number().int().min(5).max(1440).optional(),
-  plugins: z.array(packageEntrySchema).max(100),
+  /** Folder patterns whose every subfolder is a package, e.g. "plugins/*". */
+  include: z.array(z.string().trim().min(1)).max(20).optional(),
+  /** Folders to leave out of `include`, e.g. "plugins/experimental". */
+  exclude: z.array(z.string().trim().min(1)).max(200).optional(),
+  plugins: z.array(packageEntrySchema).max(100).optional(),
 });
 
 interface RepoRef {
@@ -337,7 +341,40 @@ export default async function plugin(bb: BbPluginApi) {
     const specs: PackageSpec[] = [];
     const errors: string[] = [];
     const seen = new Set<string>();
-    for (const entry of file.plugins) {
+    // "include": every subfolder of "<dir>/*" that holds a bb plugin
+    // (package.json with a "bb" section) is a package, except the hub itself
+    // and anything in "exclude". Uploading a folder there is all it takes.
+    const { hubPath } = await readConfig();
+    const excluded = new Set((file.exclude ?? []).map((entry) => entry.replace(/\/+$/u, "")));
+    for (const pattern of file.include ?? []) {
+      const parent = pattern.replace(/\/\*$/u, "").replace(/\/+$/u, "");
+      if (!pattern.endsWith("/*") || !PATH_PATTERN.test(parent)) {
+        errors.push(`Unsupported include pattern "${pattern}" (use "<folder>/*").`);
+        continue;
+      }
+      const tree = await git(["ls-tree", "-d", "--name-only", `HEAD:${parent}`], dir).catch(() => "");
+      for (const name of tree.split("\n").map((line) => line.trim()).filter(Boolean)) {
+        const folder = `${parent}/${name}`;
+        if (folder === hubPath || excluded.has(folder)) continue;
+        if (!PATH_PATTERN.test(folder)) {
+          errors.push(`"${folder}" is not a usable folder name (letters, digits, ".", "_", "-" only); skipped.`);
+          continue;
+        }
+        const manifest = await git(["show", `HEAD:${folder}/package.json`], dir)
+          .then((text) => JSON.parse(text) as { bb?: unknown })
+          .catch(() => null);
+        if (manifest === null || typeof manifest.bb !== "object" || manifest.bb === null) {
+          errors.push(`${folder} has no package.json with a "bb" section; skipped.`);
+          continue;
+        }
+        const key = `${repoKey(packagesRepo)}|${folder}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          specs.push({ ...packagesRepo, path: folder, ref: null });
+        }
+      }
+    }
+    for (const entry of file.plugins ?? []) {
       try {
         const repo = entry.repo === undefined ? packagesRepo : parseRepo(entry.repo);
         const folder = entry.path.replace(/\/+$/u, "");
@@ -510,9 +547,19 @@ export default async function plugin(bb: BbPluginApi) {
       for (const error of packages.errors) {
         results.push({ repo: "packages.json", pluginId: null, outcome: "failed", detail: error, version: null });
       }
+      const folderForId = new Map<string, string>();
       for (const spec of packages.specs) {
         const label = labelFor(spec, packages.packagesRepo);
         try {
+          // bb installs one plugin per id; a second folder with the same id
+          // would fight the first, so it is reported instead of installed.
+          const id = pluginIdForPackageName((await readPackageJson(await syncMirror(spec), spec.path)).name);
+          const first = folderForId.get(id);
+          if (first !== undefined) {
+            results.push({ repo: label, pluginId: id, outcome: "failed", detail: `Same plugin id "${id}" as ${first}; rename one package.`, version: null });
+            continue;
+          }
+          folderForId.set(id, label);
           results.push(await installOrUpdate(spec, label));
         } catch (cause) {
           results.push({ repo: label, pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null });

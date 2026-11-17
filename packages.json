@@ -1,8 +1,7 @@
 {
-  "$comment": "Plugins every hub keeps installed and up to date. path is a plugin folder in this repository; optional repo (another public owner/name) and ref (branch, tag, or semver:[prefix:]range). syncIntervalMinutes (5-1440) is the shared sync interval: every hub syncs at the same UTC-aligned times. Edit this file and push; every running hub picks it up at the next sync.",
+  "$comment": "What every hub installs. include: every subfolder of these folders that holds a bb plugin is installed (so adding a plugin is just adding a folder). exclude: folders to leave out. plugins: extra entries, e.g. from another public repo ({ \"path\", \"repo\"?, \"ref\"? }). syncIntervalMinutes (5-1440): the shared sync interval; every hub syncs at the same UTC-aligned times.",
   "syncIntervalMinutes": 15,
-  "plugins": [
-    { "path": "plugins/hello" },
-    { "path": "plugins/sidebar-text" }
-  ]
+  "include": ["plugins/*"],
+  "exclude": [],
+  "plugins": []
 }

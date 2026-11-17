@@ -25,16 +25,28 @@ bb hub adopt <folder>       # switch a plugin installed elsewhere; DELETES its s
 ```json
 {
   "syncIntervalMinutes": 15,
+  "include": ["plugins/*"],
+  "exclude": ["plugins/experimental"],
   "plugins": [
-    { "path": "plugins/hello" },
     { "path": "tools/x", "repo": "someone/public-repo", "ref": "semver:x/:^1.0.0" }
   ]
 }
 ```
 
-`path` is required. `repo` (another public repository) and `ref` (branch, tag,
-or `semver:[prefix:]range`) are optional. To add or remove a package, edit the
-file and push. The hub has no command for that, because pushing needs the
+- `include`: every subfolder of `<folder>/*` with a `package.json` that has a
+  `"bb"` section is a package (the hub's own folder is skipped). So **adding a
+  plugin is just adding a folder** under `plugins/`.
+- `exclude`: folders to leave out.
+- `plugins`: extra entries; `path` is required, and `repo` (another public
+  repository) and `ref` (branch, tag, or `semver:[prefix:]range`) are optional.
+
+To add a plugin from any source, run `scripts/add-plugin.sh <source>` in a
+clone of the repository. The source can be a local folder, a git URL, or a
+`.zip`/`.tar.gz` file or URL; `--subdir` picks a folder, `--name` the target
+folder, and `--no-push` commits without pushing. The script copies without
+`node_modules`/`dist`/`.git`/`.env`, validates the manifest, refuses duplicate
+plugin ids, then commits and pushes. Uploading the folder on GitHub works too.
+The hub has no command to add plugins, because pushing needs the
 maintainer's own git access.
 
 ## Sync behaviour

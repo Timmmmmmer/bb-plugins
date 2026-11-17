@@ -60,10 +60,16 @@ starts.
 
 ## Maintainers
 
-- **Add a package:** add `{ "path": "plugins/<name>" }` to `packages.json` and
-  push (or open a pull request).
-- **Remove a package:** delete its entry and push. Machines keep the plugin
-  installed but stop updating it.
+- **Add a plugin:** add its folder under `plugins/`. Upload it on GitHub
+  (**Add file → Upload files**), or run `scripts/add-plugin.sh <folder | git URL | .zip>`,
+  which copies, checks, commits, and pushes. Every running hub installs it at
+  the next sync.
+- **Stop installing one:** delete its folder, or add it to `exclude` in
+  `packages.json`, and push. Machines keep the plugin installed but stop
+  updating it.
+- Each folder needs a distinct plugin id (the `name` in its `package.json`).
+  The script refuses a duplicate, and the hub reports the second folder as
+  `failed`.
 - **Ship an update:** push to the plugin's folder.
 
 Anyone who can push to this repository changes what every member's hub
