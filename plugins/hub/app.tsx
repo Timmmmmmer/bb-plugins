@@ -20,6 +20,7 @@ type HubData = {
   marketplace: { label: string; entry: string }[];
   lastSync: SyncReport | null;
   schedule: Schedule;
+  hubVersion: string | null;
 };
 
 const PROBLEM: SyncResult["outcome"][] = ["failed", "other-source"];
@@ -34,10 +35,11 @@ function List({ children }: { children: ReactNode }) {
 }
 
 /** One concise row: name, status, optional action. Details show on hover. */
-function Row({ name, result, action }: { name: string; result: SyncResult | null; action?: ReactNode }) {
+function Row({ name, result, action, icon }: { name: string; result: SyncResult | null; action?: ReactNode; icon?: ReactNode }) {
   const status = result === null ? "pending" : result.outcome === "current" ? "up to date" : result.outcome;
   return (
     <li className="flex items-center gap-2 px-3 py-1.5 text-sm" title={result?.detail ?? undefined}>
+      {icon}
       <span className="min-w-0 flex-1 truncate">{name}</span>
       <span className={cn("shrink-0 text-xs", result !== null && PROBLEM.includes(result.outcome) ? "text-destructive" : "text-muted-foreground")}>
         {status}
@@ -54,58 +56,52 @@ function Empty({ children }: { children: ReactNode }) {
 // ---------------------------------------------------------------------------
 // 1-2. Packages and marketplace plugins
 
-function LocalPlugins({ data }: { data: HubData }) {
-  const local = data.packages.filter((entry) => entry.kind === "local");
-  const nameFor = (entry: PackageView) => data.folders.find((folder) => folder.path === entry.path)?.name ?? entry.label;
+/** Local (folders in the shared repo) and remote (other public repos) plugins, in one list. */
+function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
+  const nameFor = (entry: PackageView) =>
+    entry.kind === "local" ? data.folders.find((folder) => folder.path === entry.path)?.name ?? entry.label : entry.label;
   const resultFor = (label: string) => data.lastSync?.results.find((result) => result.repo === label) ?? null;
   return (
     <>
-      <Title>Local plugins</Title>
-      {local.length === 0 ? (
-        <Empty>None yet.</Empty>
+      <Title>Plugins</Title>
+      {data.packages.length === 0 ? (
+        <Empty>None yet. Add one below.</Empty>
       ) : (
         <List>
-          {local.map((entry) => (
-            <Row key={entry.label} name={nameFor(entry)} result={resultFor(entry.label)} />
+          {data.packages.map((entry) => (
+            <Row
+              key={entry.label}
+              name={nameFor(entry)}
+              result={resultFor(entry.label)}
+              icon={
+                <span title={entry.kind === "remote" ? "remote plugin" : "local plugin"} className="shrink-0 text-muted-foreground">
+                  <Icon name={entry.kind === "remote" ? "Link" : "Folder"} className="size-3.5" />
+                </span>
+              }
+              action={
+                entry.kind === "remote" ? (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6 text-muted-foreground hover:text-foreground"
+                    aria-label={`Remove ${entry.label}`}
+                    disabled={busy !== null}
+                    onClick={() =>
+                      void run(`rremove:${entry.label}`, () =>
+                        rpc.call("hub_remote_remove", { repo: entry.repo, ...(entry.path ? { path: entry.path } : {}) }),
+                      )
+                    }
+                  >
+                    <Icon name="X" className="size-3.5" />
+                  </Button>
+                ) : (
+                  <span className="size-6 shrink-0" />
+                )
+              }
+            />
           ))}
         </List>
       )}
-    </>
-  );
-}
-
-function RemotePlugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
-  const remote = data.packages.filter((entry) => entry.kind === "remote");
-  const resultFor = (label: string) => data.lastSync?.results.find((result) => result.repo === label) ?? null;
-  if (remote.length === 0) return null;
-  return (
-    <>
-      <Title>Remote plugins</Title>
-      <List>
-        {remote.map((entry) => (
-          <Row
-            key={entry.label}
-            name={entry.label}
-            result={resultFor(entry.label)}
-            action={
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-6 text-muted-foreground hover:text-foreground"
-                aria-label={`Remove ${entry.label}`}
-                disabled={busy !== null}
-                onClick={() =>
-                  void run(`rremove:${entry.label}`, () =>
-                    rpc.call("hub_remote_remove", { repo: entry.repo, ...(entry.path ? { path: entry.path } : {}) }),
-                  )
-                }
-              >
-                <Icon name="X" className="size-3.5" />
-              </Button>
-            }
-          />
-        ))}
-      </List>
     </>
   );
 }
@@ -157,7 +153,8 @@ function SyncLine({ data, busy, rpc, run }: { data: HubData; busy: string | null
   const by = Math.floor((now + data.schedule.marginSeconds * 1000) / step) * step + step;
   const self = data.lastSync?.results.find((result) => result.repo === "hub (self)") ?? null;
   return (
-    <div className="mt-5 flex items-center gap-2 text-xs text-muted-foreground">
+    <div className="mt-5">
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">
       <Icon name="Clock" className="size-3.5 shrink-0" />
       <span className="min-w-0 flex-1">
         Next sync <strong className="text-foreground">{time(by)}</strong> (every {data.schedule.intervalMinutes} min, same time for everyone)
@@ -167,6 +164,11 @@ function SyncLine({ data, busy, rpc, run }: { data: HubData; busy: string | null
         <Icon name="RefreshCw" className={cn("size-3.5", busy === "sync" && "animate-spin")} />
         Sync now
       </Button>
+    </div>
+    <p className="mt-0.5 pl-5.5 text-xs text-muted-foreground">
+      Hub {data.hubVersion ?? "version unknown"}
+      {self === null ? "" : self.outcome === "updating" ? " · updating…" : self.outcome === "current" ? " · up to date" : ` · ${self.outcome}`}
+    </p>
     </div>
   );
 }
@@ -409,8 +411,7 @@ function HubPage() {
           <p className="mt-4 text-sm text-muted-foreground">Loading…</p>
         ) : (
           <>
-            <LocalPlugins data={data} />
-            <RemotePlugins data={data} busy={busy} rpc={rpc} run={run} />
+            <Plugins data={data} busy={busy} rpc={rpc} run={run} />
             <MarketplacePlugins data={data} busy={busy} rpc={rpc} run={run} />
             <SyncLine data={data} busy={busy} rpc={rpc} run={run} />
             <AddPlugin busy={busy} rpc={rpc} run={run} />

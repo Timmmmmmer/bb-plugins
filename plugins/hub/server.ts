@@ -243,6 +243,7 @@ export const rpcContract = defineRpcContract({
       marketplace: z.array(z.object({ label: z.string(), entry: z.string() })),
       lastSync: syncReportSchema.nullable(),
       schedule: scheduleSchema,
+      hubVersion: z.string().nullable(),
     }),
   },
   hub_install: {
@@ -1457,7 +1458,8 @@ export default async function plugin(bb: BbPluginApi) {
     hub_list: async (_input, context) => {
       clientOnly(context, "hub_list");
       const lastSync = (await bb.storage.kv.get<SyncReport>(LAST_SYNC_KEY)) ?? null;
-      return { ...(await listHub()), lastSync, schedule: scheduleView(lastSync) };
+      const self = (await bb.sdk.plugins.list()).plugins.find((plugin) => plugin.id === bb.pluginId);
+      return { ...(await listHub()), lastSync, schedule: scheduleView(lastSync), hubVersion: self?.version ?? null };
     },
     hub_install: ({ path: folder }, context) => {
       clientOnly(context, "hub_install");
