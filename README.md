@@ -12,6 +12,12 @@ installs them and keeps them up to date on every member's machine.
 The repository is public, so nothing needs a GitHub token.
 
 - **Join:** see [JOIN.md](JOIN.md). It's one command.
+- **Browse in bb:** the repository is also a bb plugin marketplace,
+  [`marketplace.json`](marketplace.json) ("Team plugins"). The hub adds it to
+  **Settings → Plugin marketplaces** on every member's machine, so the plugins
+  show up in bb's own plugin store. It's generated from `packages.json` and the
+  plugin folders by `scripts/build-marketplace.mjs`, and a GitHub Action
+  regenerates it on every push; don't edit it by hand.
 - **Three kinds of plugins** every hub installs:
   - **Local plugins**: folders in `plugins/` of this repository.
   - **Remote plugins**: plugins in other **public** repositories. Nothing is

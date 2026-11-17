@@ -29,6 +29,18 @@ say `hub (self) current`. The **Plugin hub** page in the bb sidebar shows the
 same information, plus every plugin folder in the repository with an Install
 button.
 
+## Team marketplace
+
+The hub also adds this repository's [`marketplace.json`](marketplace.json) to
+**Settings → Plugin marketplaces** (as "Team plugins"), so its plugins show up
+in bb's plugin store too. To add it by hand on a machine without the hub:
+
+```sh
+bb marketplace add git:https://github.com/Timmmmmmer/bb-plugins.git
+```
+
+Turn the automatic step off with `bb plugin config hub set registerMarketplace false`.
+
 ## On a server
 
 The hub keeps a small git mirror of this repository. By default it goes in

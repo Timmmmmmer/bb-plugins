@@ -44,6 +44,7 @@ const PROPAGATION_MARGIN_MS = 60_000;
 const SYNC_INTERVAL_KEY = "syncIntervalMinutes";
 const LAST_SYNC_KEY = "lastSync";
 const SELF_UPDATE_KEY = "selfUpdateAttempt";
+const MARKETPLACE_REFRESHED_KEY = "teamMarketplaceRefreshedAt";
 const SELF_UPDATE_GRACE_MS = 10 * 60_000;
 const SELF_UPDATE_DELAY_MS = 5_000;
 const HUB_CHANGED = "hub-changed";
@@ -393,6 +394,13 @@ export default async function plugin(bb: BbPluginApi) {
       type: "boolean",
       label: "Update the hub automatically",
       description: "At the end of every sync, update the hub itself when its folder has changed.",
+      default: true,
+    },
+    registerMarketplace: {
+      type: "boolean",
+      label: "Show the team marketplace in Settings",
+      description:
+        "Add the shared repository's marketplace.json to Settings → Plugin marketplaces on this machine, and refresh it when the repository changes.",
       default: true,
     },
     mirrorsDir: {
@@ -929,6 +937,37 @@ export default async function plugin(bb: BbPluginApi) {
   // -------------------------------------------------------------------------
   // Sync
 
+  /**
+   * Register the shared repository's marketplace.json with bb (Settings →
+   * Plugin marketplaces) if this machine doesn't have it yet, and refresh it
+   * when the repository has a new commit. Returns a result only on a change
+   * or a failure.
+   */
+  async function ensureTeamMarketplace(packagesRepo: RepoRef, dir: string): Promise<SyncResult | null> {
+    if (!(await settings.get()).registerMarketplace) return null;
+    const text = await git(["show", "HEAD:marketplace.json"], dir).catch(() => null);
+    if (text === null) return null;
+    const label = "team marketplace";
+    try {
+      const name = z.object({ name: z.string().min(1) }).parse(JSON.parse(text)).name;
+      const head = (await git(["rev-parse", "HEAD"], dir)).trim();
+      const known = (await bb.sdk.plugins.marketplaces.list()).find((marketplace) => marketplace.name === name);
+      if (known === undefined) {
+        await bb.sdk.plugins.marketplaces.add({ source: `git:${repoUrl(packagesRepo)}` });
+        await bb.storage.kv.set(MARKETPLACE_REFRESHED_KEY, head);
+        bb.log.info(`added the ${name} marketplace from ${repoDisplay(packagesRepo)}`);
+        return { repo: label, pluginId: null, outcome: "installed", detail: `"${name}" added to Settings → Plugin marketplaces`, version: null };
+      }
+      if ((await bb.storage.kv.get<string>(MARKETPLACE_REFRESHED_KEY)) !== head) {
+        await bb.sdk.plugins.marketplaces.refresh({ name });
+        await bb.storage.kv.set(MARKETPLACE_REFRESHED_KEY, head);
+      }
+      return null;
+    } catch (cause) {
+      return { repo: label, pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null };
+    }
+  }
+
   async function runSync(trigger: string): Promise<SyncReport> {
     const startedAt = Date.now();
     fetchedThisRound.clear();
@@ -940,6 +979,8 @@ export default async function plugin(bb: BbPluginApi) {
       const packages = await loadPackages();
       from = packages.from;
       packagesDir = await syncMirror(packages.packagesRepo);
+      const marketplaceResult = await ensureTeamMarketplace(packages.packagesRepo, packagesDir);
+      if (marketplaceResult !== null) results.push(marketplaceResult);
       for (const error of packages.errors) {
         results.push({ repo: "packages.json", pluginId: null, outcome: "failed", detail: error, version: null });
       }

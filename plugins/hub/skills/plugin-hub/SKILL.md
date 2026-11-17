@@ -141,3 +141,15 @@ installed from the shared repository, and never while a package with that id
 is still listed. Adding a plugin with that id again (local, remote, or
 marketplace) takes it off the list. This is irreversible for every member:
 always confirm with the user before passing `--yes`.
+
+## Team marketplace (Settings → Plugin marketplaces)
+
+The shared repository has a generated `marketplace.json` (bb marketplace
+schema v1, name `bb-plugins`) listing every local plugin (the hub included)
+and every remote plugin on GitHub. `scripts/build-marketplace.mjs` builds it,
+and `.github/workflows/marketplace.yml` reruns it on every push. Never edit it
+by hand. On each sync the hub adds it with
+`marketplaces.add({ source: "git:https://github.com/<owner>/<repo>.git" })`
+when it's missing, and refreshes it when the repository's commit changed
+(setting `registerMarketplace`, on by default). It then appears in Settings →
+Plugin marketplaces and in `bb plugin search`.
