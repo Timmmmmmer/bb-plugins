@@ -5,13 +5,7 @@
     "plugins/*"
   ],
   "exclude": [],
-  "remote": [
-    {
-      "repo": "lean-software-production/ensembleworks",
-      "path": "plugins/canvas",
-      "ref": "main"
-    }
-  ],
+  "remote": [],
   "uninstall": [],
   "marketplace": []
 }
