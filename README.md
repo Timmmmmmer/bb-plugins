@@ -60,7 +60,7 @@ The repository is public, so nothing needs a GitHub token.
 Members only get what's in this repository (or the branch or tag it points
 to). So develop somewhere else and publish when you choose.
 
-### Option 1: develop locally, copy it in when it's stable
+### Option 1: develop locally, publish when it's stable
 
 Best for team plugins that live in this repository.
 
@@ -70,20 +70,40 @@ Best for team plugins that live in this repository.
    bb plugin install .     # registers the folder in place, on this machine only
    bb plugin dev           # rebuilds and reloads on every save
    ```
-2. **First release to everyone:**
+2. **Publish it** (the first release, and every one after it):
    ```sh
-   bb hub plugin add ~/code/my-plugin            # copies it into plugins/my-plugin and pushes
+   bb hub plugin publish ~/code/my-plugin [--group <id>]
    ```
-   Or drop the folder on the Plugin hub page. Every hub installs it at the
-   next sync (within 15 minutes).
+   Or use **Publish** under **Your local plugins** on the Plugin hub page
+   (every plugin you run from your own folder is listed there). It copies the
+   folder into the group's `plugins/<name>` and pushes. It refuses unless
+   `version` in `package.json` is newer than the published copy, and lists
+   what changed. Every hub in the group gets it at the next sync (within 15
+   minutes) and keeps the plugin's settings and data.
 3. **Keep developing** in `~/code/my-plugin`. Your machine keeps running your
-   local copy (the hub leaves it alone and shows it as installed from another
-   source); everyone else stays on the released copy.
-4. **Release again when it's stable.** Bump `version` in `package.json`, then:
-   ```sh
-   bb hub plugin add ~/code/my-plugin --force    # replaces plugins/my-plugin and pushes
-   ```
-   Every hub updates it at the next sync and keeps its settings and data.
+   folder (the hub leaves it alone); everyone else stays on the published copy.
+   Bump the version and publish again when it's stable.
+
+### Betas: try a new version with a few people first
+
+1. **Publish a beta:** `bb hub plugin publish ~/code/my-plugin --beta`, or
+   **Publish beta** on the page. It goes to the group's `beta/<name>` folder,
+   and its version must be newer than the stable copy.
+2. **Testers join it:** `bb hub beta join <plugin-id>`, or **Join beta** under
+   **Betas** on the page. `bb hub beta` lists the betas in your groups.
+   Joining and leaving (`bb hub beta leave <plugin-id>`) switch the plugin
+   between its copies **without a reinstall**: its settings and data stay.
+   Everyone else stays on the stable copy.
+3. **Make it the stable copy:** `bb hub plugin promote <plugin-id>`, or
+   **Promote** on the page. Everyone gets it; testers move back to the stable
+   copy, keeping their data.
+
+How the switch keeps data: the hub installs the shared plugins from its own
+checkout of this repository, so moving between copies only changes the folder
+bb loads them from. One catch: a plugin that was installed before the hub did
+this (from git) needs a one-time reinstall, which resets its settings and data,
+the first time that machine joins its beta. The page asks first; on the CLI it
+is `bb hub beta join <plugin-id> --reset-data`.
 
 ### Option 2: its own public repository, released by branch or tag
 
@@ -100,11 +120,3 @@ remote entry in `packages.json`:
 A followed repository (one with several plugins) works the same way: give its
 `follow` entry a `ref`. Without one it follows the default branch, so every
 commit to `main` reaches everyone.
-
-### Testing with a few people first
-
-Use a group as a beta channel: put the newer version in a group only the
-testers subscribe to. When the same plugin is in two subscribed groups, the
-newest version wins. One catch: a machine that already has the plugin from one
-group doesn't switch to another group's copy by itself, because switching
-reinstalls it and resets its data. Testers run `bb hub adopt <folder>` once.

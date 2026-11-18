@@ -35,6 +35,10 @@ const REF_PATTERN = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/^~<>=*|: +-]{1,100}$/u;
 const PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[A-Za-z0-9._/-]{1,200}$/u;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
 const PLUGINS_FOLDER = "plugins";
+/** Each group's folder of beta copies: <group>/beta/<name>. */
+const BETA_FOLDER = "beta";
+/** kv: a plugin whose (git) install may be reset once to join its beta. */
+const BETA_RESET_KEY = "betaResetAllowed";
 const GIT_TIMEOUT_MS = 180_000;
 
 // Shared schedule: every hub syncs at multiples of the interval since the
@@ -162,6 +166,8 @@ interface PackageSpec extends RepoRef {
   group?: string;
   /** From a followed repository: built from the hub's checkout, installed from that path. */
   follow?: boolean;
+  /** A beta copy (a group's beta/<name> folder), installed only on machines that joined its beta. */
+  beta?: boolean;
 }
 
 /** A group of plugins: the repository root (home) or a folder under groups/. */
@@ -319,6 +325,45 @@ const packageViewSchema = z.object({
 });
 export type PackageView = z.infer<typeof packageViewSchema>;
 
+const betaViewSchema = z.object({
+  pluginId: z.string(),
+  name: z.string(),
+  path: z.string(),
+  version: z.string().nullable(),
+  stablePath: z.string().nullable(),
+  stableVersion: z.string().nullable(),
+  joined: z.boolean(),
+  /** Joining needs a one-time reinstall (installed from git before betas existed), which resets its data. */
+  needsReset: z.boolean(),
+  installedVersion: z.string().nullable(),
+  /** This machine runs the beta copy right now. */
+  running: z.boolean(),
+});
+export type BetaView = z.infer<typeof betaViewSchema>;
+const devPluginSchema = z.object({
+  pluginId: z.string(),
+  name: z.string(),
+  version: z.string().nullable(),
+  dir: z.string(),
+  stablePath: z.string().nullable(),
+  stableVersion: z.string().nullable(),
+  betaPath: z.string().nullable(),
+  betaVersion: z.string().nullable(),
+});
+export type DevPlugin = z.infer<typeof devPluginSchema>;
+const publishOutputSchema = z.object({
+  pluginId: z.string(),
+  folder: z.string(),
+  beta: z.boolean(),
+  from: z.string().nullable(),
+  to: z.string(),
+  commit: z.string().nullable(),
+  /** What changed, from git diff --stat. */
+  changes: z.array(z.string()),
+  guaranteedBy: z.string(),
+  sync: syncResultSchema.nullable(),
+});
+
 export const rpcContract = defineRpcContract({
   hub_list: {
     input: z.object({ group: z.string().trim().max(64).optional() }).nullable(),
@@ -351,6 +396,10 @@ export const rpcContract = defineRpcContract({
           })
           .nullable(),
       })),
+      /** Beta copies in this group, and whether this machine runs them. */
+      betas: z.array(betaViewSchema),
+      /** Plugins this machine runs from its own folders (being developed), with what the group has published. */
+      devPlugins: z.array(devPluginSchema),
       lastSync: syncReportSchema.nullable(),
       schedule: scheduleSchema,
       hubVersion: z.string().nullable(),
@@ -396,6 +445,18 @@ export const rpcContract = defineRpcContract({
   hub_group_subscribe: {
     input: z.object({ group: z.string().trim().min(1).max(64), subscribed: z.boolean() }),
     output: z.object({ group: z.string(), name: z.string(), subscribed: z.boolean(), guaranteedBy: z.string() }),
+  },
+  hub_publish: {
+    input: z.object({ dir: z.string().trim().min(1).max(1000), group: z.string().trim().max(64).optional(), beta: z.boolean().optional() }),
+    output: publishOutputSchema,
+  },
+  hub_promote: {
+    input: z.object({ plugin: z.string().trim().min(1).max(200), group: z.string().trim().max(64).optional() }),
+    output: z.object({ pluginId: z.string(), from: z.string(), to: z.string(), version: z.string().nullable(), commit: z.string().nullable(), guaranteedBy: z.string() }),
+  },
+  hub_beta: {
+    input: z.object({ pluginId: z.string().trim().min(1).max(128), joined: z.boolean(), resetData: z.boolean().optional() }),
+    output: z.object({ pluginId: z.string(), joined: z.boolean(), beta: z.array(z.string()) }),
   },
   hub_group_add: {
     input: z.object({ name: z.string().trim().min(1).max(60), id: z.string().trim().max(64).optional() }),
@@ -494,6 +555,13 @@ export default async function plugin(bb: BbPluginApi) {
         "Comma-separated ids of the groups this machine installs, in addition to the home group (always on). Manage with `bb hub group subscribe/unsubscribe <id>` or the selector on the Plugin hub page.",
       default: "",
     },
+    beta: {
+      type: "string",
+      label: "Beta plugins",
+      description:
+        "Comma-separated ids of the plugins this machine runs the beta copy of (\"*\" for every plugin with one). Manage with `bb hub beta join/leave <id>` or the β toggles on the Plugin hub page.",
+      default: "",
+    },
     hubPath: {
       type: "string",
       label: "Hub folder",
@@ -532,7 +600,8 @@ export default async function plugin(bb: BbPluginApi) {
       .split(/[\s,]+/u)
       .map((entry) => entry.trim().toLowerCase())
       .filter((entry) => GROUP_ID_PATTERN.test(entry) && entry !== HOME_GROUP);
-    return { packagesRepo: parseRepo(values.packagesRepo), hubPath, selfUpdate: values.selfUpdate, subscribed: [...new Set(subscribed)] };
+    const beta = [...new Set(values.beta.split(/[\s,]+/u).map((entry) => entry.trim().toLowerCase()).filter((entry) => entry === "*" || ENTRY_ID_PATTERN.test(entry)))];
+    return { packagesRepo: parseRepo(values.packagesRepo), hubPath, selfUpdate: values.selfUpdate, subscribed: [...new Set(subscribed)], beta };
   }
 
   // -------------------------------------------------------------------------
@@ -725,6 +794,15 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
     }
+    // Beta copies: every <group>/beta/<name> that holds a bb plugin.
+    const betas: PackageSpec[] = [];
+    const betaParent = inGroup(group, BETA_FOLDER);
+    for (const name of (await git(["ls-tree", "-d", "--name-only", `HEAD:${betaParent}`], dir).catch(() => "")).split("\n").map((line) => line.trim()).filter(Boolean)) {
+      const folder = `${betaParent}/${name}`;
+      if (!PATH_PATTERN.test(folder)) continue;
+      const manifest = await git(["show", `HEAD:${folder}/package.json`], dir).then((text) => JSON.parse(text) as { bb?: unknown }, () => null);
+      if (manifest !== null && typeof manifest.bb === "object" && manifest.bb !== null) betas.push({ ...packagesRepo, path: folder, ref: null, group: group.id, beta: true });
+    }
     for (const entry of file.local ?? []) {
       const folder = entry.path.replace(/^\/+|\/+$/gu, "");
       if (!PATH_PATTERN.test(folder) || folder === hubPath) {
@@ -791,13 +869,13 @@ export default async function plugin(bb: BbPluginApi) {
       marketplace.push({ id: entry.id, marketplace: entry.marketplace ?? null, source: entry.source ?? null, subdirectory: entry.subdirectory ?? null });
     }
     const uninstall = [...new Set((file.uninstall ?? []).map((id) => id.toLowerCase()).filter((id) => ENTRY_ID_PATTERN.test(id)))];
-    return { from: `${repoDisplay(packagesRepo)}/${inGroup(group, "packages.json")}`, packagesRepo, group, specs, marketplace, uninstall, errors };
+    return { from: `${repoDisplay(packagesRepo)}/${inGroup(group, "packages.json")}`, packagesRepo, group, specs, betas, marketplace, uninstall, errors };
   }
 
   const isLocal = (spec: PackageSpec, packagesRepo: RepoRef) => repoKey(spec) === repoKey(packagesRepo);
   const labelFor = (spec: PackageSpec, packagesRepo: RepoRef) =>
     isLocal(spec, packagesRepo)
-      ? `${spec.path}${spec.ref ? `@${spec.ref}` : ""}`
+      ? `${spec.path}${spec.ref ? `@${spec.ref}` : ""}${spec.beta ? " (beta)" : ""}`
       : `${repoDisplay(spec)}${spec.path ? `/${spec.path}` : ""}${spec.ref ? `@${spec.ref}` : ""}${spec.follow ? " (followed)" : ""}`;
   const sourceFor = (spec: PackageSpec) => `git:${repoUrl(spec)}${spec.ref ? `@${spec.ref}` : ""}`;
   const isHubSource = (installedSource: string, spec: PackageSpec) => {
@@ -1036,6 +1114,16 @@ export default async function plugin(bb: BbPluginApi) {
     return [...found];
   }
 
+  /** Where the hub keeps its checkout of a repository (followed, or the shared one). */
+  async function checkoutDir(spec: RepoRef & { ref?: string | null }): Promise<string> {
+    return path.join(path.dirname(await ensureMirrorRoot()), "follow", spec.owner.toLowerCase(), `${spec.name.toLowerCase()}${spec.ref ? `@${spec.ref.replace(/[^A-Za-z0-9._-]+/gu, "_")}` : ""}`);
+  }
+  /** Whether a plugin folder is inside one of the hub's checkouts. */
+  async function inHubCheckout(dir: string): Promise<boolean> {
+    const root = path.join(path.dirname(await ensureMirrorRoot()), "follow");
+    return path.resolve(dir).startsWith(`${root}${path.sep}`);
+  }
+
   type Prepared = { dir: string; head: string; workspaces: WorkspaceInfo };
   const preparedThisRound = new Map<string, Promise<Prepared>>();
   const followKey = (spec: PackageSpec) => `${repoKey(spec)}${spec.ref ? `@${spec.ref}` : ""}`;
@@ -1048,7 +1136,7 @@ export default async function plugin(bb: BbPluginApi) {
     const work = (async () => {
       const mirror = await syncMirror(spec);
       const head = (await git(["rev-parse", `${spec.ref ?? "HEAD"}^{commit}`], mirror)).trim();
-      const dir = path.join(path.dirname(await ensureMirrorRoot()), "follow", spec.owner.toLowerCase(), `${spec.name.toLowerCase()}${spec.ref ? `@${spec.ref.replace(/[^A-Za-z0-9._-]+/gu, "_")}` : ""}`);
+      const dir = await checkoutDir(spec);
       if (!(await exists(path.join(dir, ".git")))) {
         await mkdir(path.dirname(dir), { recursive: true });
         await rm(dir, { recursive: true, force: true });
@@ -1087,12 +1175,14 @@ export default async function plugin(bb: BbPluginApi) {
     const pluginDir = path.join(prepared.dir, ...spec.path.split("/").filter(Boolean));
     const installed = (await bb.sdk.plugins.list()).plugins.find((entry) => entry.id === pluginId);
     const here = installed !== undefined && path.resolve(installed.rootDir) === path.resolve(pluginDir);
-    if (installed !== undefined && !here && !installed.source.startsWith("path:")) {
+    if (installed !== undefined && !here && !(await inHubCheckout(installed.rootDir))) {
       return {
         repo: label,
         pluginId,
         outcome: "other-source",
-        detail: `Installed from ${installed.source}. To install it from the followed repository instead, run \`bb plugin remove ${pluginId}\` (this deletes its settings and data) and \`bb hub sync\`.`,
+        detail: installed.source.startsWith("path:")
+          ? `Installed from your own folder ${installed.rootDir}, so the hub leaves it alone. Publish it with \`bb hub plugin publish ${installed.rootDir}\`.`
+          : `Installed from ${installed.source}. To install it from the hub instead, run \`bb plugin remove ${pluginId}\` (this deletes its settings and data) and \`bb hub sync\`.`,
         version: installed.version,
       };
     }
@@ -1144,6 +1234,29 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (spec.follow) return installFollowed(spec, label, pluginId);
     const installed = (await bb.sdk.plugins.list()).plugins.find((entry) => entry.id === pluginId);
+    // Shared-repository plugins install from the hub's checkout (a path
+    // install), so switching between copies (stable/beta, another group's)
+    // moves the plugin and keeps its settings and data. Plugins installed
+    // from git before that keep their git install.
+    if (isLocal(spec, await readConfig().then((config) => config.packagesRepo))) {
+      if (installed === undefined || (await inHubCheckout(installed.rootDir))) return installFollowed(spec, label, pluginId);
+      if (spec.beta && isHubSource(installed.source, spec)) {
+        const resetKey = `${BETA_RESET_KEY}:${pluginId}`;
+        if ((await bb.storage.kv.get<boolean>(resetKey)) === true) {
+          await bb.sdk.plugins.remove({ pluginId });
+          await bb.storage.kv.delete(resetKey);
+          bb.log.info(`reinstalling ${pluginId} from the checkout to join its beta (its settings and data were reset)`);
+          return installFollowed(spec, label, pluginId);
+        }
+        return {
+          repo: label,
+          pluginId,
+          outcome: "skipped",
+          detail: `Joining the beta needs a one-time reinstall of ${pluginId} (it was installed before betas existed), which resets its settings and data. Run \`bb hub beta join ${pluginId} --reset-data\` or confirm on the Plugin hub page.`,
+          version: installed.version,
+        };
+      }
+    }
     if (installed === undefined) {
       let result: { id: string; version: string };
       try {
@@ -1586,6 +1699,195 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // -------------------------------------------------------------------------
+  // Publishing from a development folder, betas, promoting
+
+  type Installed = Awaited<ReturnType<BbPluginApi["sdk"]["plugins"]["list"]>>["plugins"][number];
+
+  /** A group's stable and beta copies of a plugin id, in a working clone (or the mirror). */
+  async function copiesIn(read: (folder: string) => Promise<string | null>, list: (folder: string) => Promise<string[]>, group: Group, ownedLocal: string[], pluginId: string) {
+    const idAt = async (folder: string) => {
+      const text = await read(`${folder}/package.json`);
+      if (text === null) return null;
+      try {
+        const manifest = JSON.parse(text) as { name?: string; version?: string };
+        return { id: pluginIdForPackageName(manifest.name ?? ""), version: manifest.version ?? null };
+      } catch {
+        return null;
+      }
+    };
+    let stable: { path: string; version: string | null } | null = null;
+    let beta: { path: string; version: string | null } | null = null;
+    const stableFolders = [...(await list(inGroup(group, PLUGINS_FOLDER))).map((name) => `${inGroup(group, PLUGINS_FOLDER)}/${name}`), ...ownedLocal];
+    for (const folder of stableFolders) {
+      const found = await idAt(folder);
+      if (found?.id === pluginId) { stable = { path: folder, version: found.version }; break; }
+    }
+    for (const name of await list(inGroup(group, BETA_FOLDER))) {
+      const folder = `${inGroup(group, BETA_FOLDER)}/${name}`;
+      const found = await idAt(folder);
+      if (found?.id === pluginId) { beta = { path: folder, version: found.version }; break; }
+    }
+    return { stable, beta };
+  }
+
+  /** Copies of a plugin id in a group, read from a working clone. */
+  async function copiesInWork(work: string, group: Group, pluginId: string) {
+    const document = await readJsonFile(path.join(work, inGroup(group, "packages.json"))).catch(() => ({}) as Record<string, unknown>);
+    const owned = entries(document, "local").map((entry) => String(entry.path ?? "").replace(/^\/+|\/+$/gu, "")).filter(Boolean);
+    return copiesIn(
+      (file) => readFile(path.join(work, file), "utf8").catch(() => null),
+      async (folder) => (await readdir(path.join(work, folder), { withFileTypes: true }).catch(() => [])).filter((entry) => entry.isDirectory()).map((entry) => entry.name),
+      group,
+      owned,
+      pluginId,
+    );
+  }
+
+  /**
+   * Publish a plugin from a development folder to a group: its stable copy
+   * (plugins/<name>), or with beta its beta copy (beta/<name>). The version
+   * must be newer than the copy it replaces (and, for a beta, than the stable
+   * copy). One commit; every hub picks it up at the next sync.
+   */
+  async function publishPlugin(dir: string, options: { group?: string; beta?: boolean }) {
+    const beta = options.beta === true;
+    const outcome = await serialize(async () => {
+      const source = path.resolve(dir);
+      if (!(await isPluginDir(source))) throw new Error(`${source} is not a bb plugin folder (a package.json with a "bb" section).`);
+      const { pluginId } = await checkManifest(source);
+      if (pluginId === bb.pluginId) throw new Error("That is the hub itself; push changes to it directly.");
+      const version = z.object({ version: z.string().min(1) }).parse(JSON.parse(await readFile(path.join(source, "package.json"), "utf8"))).version;
+      const { packagesRepo } = await readConfig();
+      const group = await findGroup(options.group);
+      const work = await workingClone(packagesRepo);
+      const { stable, beta: betaCopy } = await copiesInWork(work, group, pluginId);
+      const target = beta
+        ? betaCopy?.path ?? `${inGroup(group, BETA_FOLDER)}/${path.posix.basename(stable?.path ?? pluginId)}`
+        : stable?.path ?? `${inGroup(group, PLUGINS_FOLDER)}/${pluginId}`;
+      const replaced = beta ? betaCopy : stable;
+      if (replaced !== null && compareVersions(version, replaced.version) <= 0) {
+        throw new Error(`${pluginId} ${version} isn't newer than the published ${beta ? "beta" : "stable"} copy (${replaced.version ?? "no version"}). Bump "version" in package.json first.`);
+      }
+      if (beta && stable !== null && compareVersions(version, stable.version) <= 0) {
+        throw new Error(`A beta must be newer than the stable copy (${stable.version ?? "no version"}). Bump "version" in package.json first.`);
+      }
+      const dest = path.join(work, ...target.split("/"));
+      await rm(dest, { recursive: true, force: true });
+      await copyPlugin(source, dest);
+      if (!(await exists(path.join(dest, ".gitignore")))) await writeFile(path.join(dest, ".gitignore"), "node_modules/\ndist/\n");
+      const packagesRelative = inGroup(group, "packages.json");
+      const packagesDoc = await readJsonFile(path.join(work, packagesRelative));
+      const cleaned = withoutUninstall(packagesDoc, pluginId);
+      if (cleaned !== packagesDoc) await writeJsonFile(path.join(work, packagesRelative), cleaned);
+      await git(["add", "-A", "--", target], work);
+      const changes = (await git(["diff", "--cached", "--stat=100", "--", target], work)).split("\n").map((line) => line.trim()).filter(Boolean).slice(-40);
+      const commit = await commitAndPush(work, [target, packagesRelative], `${group.id === HOME_GROUP ? "" : `${group.name}: `}Publish ${pluginId} ${version}${beta ? " (beta)" : ""}`, packagesRepo);
+      bb.log.info(`published ${pluginId} ${version}${beta ? " (beta)" : ""} to ${target} (${commit ?? "no change"})`);
+      return { pluginId, folder: target, beta, from: replaced?.version ?? null, to: version, commit, changes };
+    });
+    const report = await requestSync("plugin published");
+    const sync = report.results.find((entry) => entry.pluginId === outcome.pluginId) ?? null;
+    bb.realtime.publish(HUB_CHANGED, { published: outcome.pluginId });
+    return { ...outcome, guaranteedBy: scheduleView(null).guaranteedBy, sync };
+  }
+
+  /** Make a group's beta copy of a plugin its stable copy (the beta folder goes). Machines on the beta move to it without a reinstall. */
+  async function promoteBeta(plugin: string, groupId?: string) {
+    const outcome = await serialize(async () => {
+      const { packagesRepo } = await readConfig();
+      const group = await findGroup(groupId);
+      const work = await workingClone(packagesRepo);
+      // A plugin id, or a beta folder name.
+      let pluginId = plugin.trim().toLowerCase();
+      const byName = path.join(work, inGroup(group, BETA_FOLDER), pluginId, "package.json");
+      if (await exists(byName)) pluginId = pluginIdForPackageName((JSON.parse(await readFile(byName, "utf8")) as { name?: string }).name ?? "");
+      const { stable, beta } = await copiesInWork(work, group, pluginId);
+      if (beta === null) throw new Error(`${group.name} has no beta copy of ${plugin}.`);
+      const target = stable?.path ?? `${inGroup(group, PLUGINS_FOLDER)}/${path.posix.basename(beta.path)}`;
+      await rm(path.join(work, ...target.split("/")), { recursive: true, force: true });
+      await cp(path.join(work, ...beta.path.split("/")), path.join(work, ...target.split("/")), { recursive: true });
+      await rm(path.join(work, ...beta.path.split("/")), { recursive: true, force: true });
+      const commit = await commitAndPush(work, [target, beta.path], `${group.id === HOME_GROUP ? "" : `${group.name}: `}Promote the ${pluginId} beta (${beta.version ?? "?"}) to stable`, packagesRepo);
+      bb.log.info(`promoted ${beta.path} to ${target} (${commit ?? "no change"})`);
+      return { pluginId, from: beta.path, to: target, version: beta.version, commit };
+    });
+    await requestSync("beta promoted");
+    bb.realtime.publish(HUB_CHANGED, { promoted: outcome.pluginId });
+    return { ...outcome, guaranteedBy: scheduleView(null).guaranteedBy };
+  }
+
+  /** Join or leave a plugin's beta on this machine (the "beta" setting). */
+  async function setBeta(pluginId: string, joined: boolean, resetData = false) {
+    const id = pluginId.trim().toLowerCase();
+    if (!ENTRY_ID_PATTERN.test(id)) throw new Error(`"${pluginId}" is not a plugin id.`);
+    const { beta } = await readConfig();
+    if (!joined && beta.includes("*")) throw new Error('This machine runs every beta ("*" in the beta setting); change it with `bb plugin config hub set beta <ids>`.');
+    const next = joined ? [...new Set([...beta, id])] : beta.filter((entry) => entry !== id);
+    const resetKey = `${BETA_RESET_KEY}:${id}`;
+    if (joined && resetData) await bb.storage.kv.set(resetKey, true);
+    if (!joined) await bb.storage.kv.delete(resetKey);
+    // The settings change starts a sync, which switches the plugin.
+    await settings.experimental_set({ beta: next.join(",") });
+    bb.log.info(`${joined ? "joined" : "left"} the beta of ${id}`);
+    bb.realtime.publish(HUB_CHANGED, { beta: id });
+    return { pluginId: id, joined, beta: next };
+  }
+
+  /** The page's beta and development-folder views for a group. */
+  async function betaAndDevViews(packages: Awaited<ReturnType<typeof loadPackages>>, installedPlugins: Installed[]) {
+    const { beta: betaIds, packagesRepo } = await readConfig();
+    const mirror = await syncMirror(packagesRepo);
+    const fileText = await git(["show", `HEAD:${inGroup(packages.group, "packages.json")}`], mirror).catch(() => "{}");
+    const owned = entries(z.record(z.string(), z.unknown()).catch({}).parse(JSON.parse(fileText)), "local").map((entry) => String(entry.path ?? "").replace(/^\/+|\/+$/gu, "")).filter(Boolean);
+    const copies = (pluginId: string) =>
+      copiesIn(
+        (file) => git(["show", `HEAD:${file}`], mirror).catch(() => null),
+        async (folder) => (await git(["ls-tree", "-d", "--name-only", `HEAD:${folder}`], mirror).catch(() => "")).split("\n").map((line) => line.trim()).filter(Boolean),
+        packages.group,
+        owned,
+        pluginId,
+      );
+    const sharedCheckout = await checkoutDir(packagesRepo);
+    const betas: BetaView[] = [];
+    for (const spec of packages.betas) {
+      const manifest = await readPackageJson(mirror, spec.path).catch(() => null);
+      if (manifest === null) continue;
+      const pluginId = pluginIdForPackageName(manifest.name);
+      const { stable } = await copies(pluginId);
+      const plugin = installedPlugins.find((entry) => entry.id === pluginId);
+      betas.push({
+        pluginId,
+        name: manifest.bb?.name ?? pluginId,
+        path: spec.path,
+        version: manifest.version ?? null,
+        stablePath: stable?.path ?? null,
+        stableVersion: stable?.version ?? null,
+        joined: betaIds.includes("*") || betaIds.includes(pluginId),
+        needsReset: plugin !== undefined && isHubSource(plugin.source, spec),
+        installedVersion: plugin?.version ?? null,
+        running: plugin !== undefined && path.resolve(plugin.rootDir) === path.resolve(sharedCheckout, ...spec.path.split("/")),
+      });
+    }
+    const devPlugins: DevPlugin[] = [];
+    for (const plugin of installedPlugins) {
+      if (!plugin.source.startsWith("path:") || plugin.id === bb.pluginId || (await inHubCheckout(plugin.rootDir))) continue;
+      const manifest = await readFile(path.join(plugin.rootDir, "package.json"), "utf8").then((text) => JSON.parse(text) as { version?: string; bb?: { name?: string } }, () => null);
+      const { stable, beta } = await copies(plugin.id);
+      devPlugins.push({
+        pluginId: plugin.id,
+        name: manifest?.bb?.name ?? plugin.id,
+        version: manifest?.version ?? plugin.version ?? null,
+        dir: plugin.rootDir,
+        stablePath: stable?.path ?? null,
+        stableVersion: stable?.version ?? null,
+        betaPath: beta?.path ?? null,
+        betaVersion: beta?.version ?? null,
+      });
+    }
+    return { betas, devPlugins };
+  }
+
+  // -------------------------------------------------------------------------
   // Managing groups. A group's id and folder never change (machines subscribe
   // by id, and its marketplace is named after it); renaming changes only its
   // display name.
@@ -1844,7 +2146,7 @@ export default async function plugin(bb: BbPluginApi) {
     let startSelfUpdate = false;
     let packagesDir: string | null = null;
     try {
-      const { packagesRepo, subscribed } = await readConfig();
+      const { packagesRepo, subscribed, beta: betaIds } = await readConfig();
       const groups = await subscribedGroups();
       const allGroups = await listGroups();
       packagesDir = await syncMirror(packagesRepo);
@@ -1890,14 +2192,35 @@ export default async function plugin(bb: BbPluginApi) {
           }
         }
       }
+      // Beta copies, for the plugins this machine joined the beta of.
+      const joined = (id: string) => betaIds.includes("*") || betaIds.includes(id);
+      const betaById = new Map<string, Candidate>();
+      for (const packages of loaded) {
+        for (const spec of packages.betas) {
+          try {
+            const manifest = await readPackageJson(await syncMirror(spec), spec.path);
+            const id = pluginIdForPackageName(manifest.name);
+            if (!joined(id)) continue;
+            const candidate = { spec, label: labelFor(spec, packagesRepo), group: packages.group, order: order++, version: manifest.version ?? null };
+            const best = betaById.get(id);
+            if (best === undefined || compareVersions(candidate.version, best.version) > 0) betaById.set(id, candidate);
+          } catch (cause) {
+            results.push({ repo: labelFor(spec, packagesRepo), pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null });
+          }
+        }
+      }
+      for (const id of betaById.keys()) if (!byId.has(id)) byId.set(id, []);
       // A clash (one plugin id in several places) goes to the newest version;
-      // on a tie, the home group, then group order.
+      // on a tie, the home group, then group order. A joined beta wins unless
+      // the stable copy is newer (the beta is out of date).
       const folderForId = new Map<string, string>();
       for (const [id, candidates] of byId) {
         const ranked = [...candidates].sort((a, b) => compareVersions(b.version, a.version) || a.order - b.order);
-        const winner = ranked[0] as Candidate;
+        const stable = ranked[0];
+        const betaCandidate = betaById.get(id);
+        const winner = (betaCandidate !== undefined && (stable === undefined || compareVersions(betaCandidate.version, stable.version) >= 0) ? betaCandidate : stable) as Candidate;
         folderForId.set(id, winner.label);
-        for (const loser of ranked.slice(1)) {
+        for (const loser of ranked.filter((candidate) => candidate !== winner && candidate !== stable)) {
           results.push({
             repo: loser.label,
             pluginId: id,
@@ -1937,10 +2260,12 @@ export default async function plugin(bb: BbPluginApi) {
           const plugin = installedNow.find((entry) => entry.id === id);
           if (plugin === undefined) continue;
           const source = plugin.source.toLowerCase();
-          if (source !== sharedSource && !source.startsWith(`${sharedSource}@`)) continue;
+          const sharedCheckout = await checkoutDir(packagesRepo);
+          const fromCheckout = path.resolve(plugin.rootDir).startsWith(`${sharedCheckout}${path.sep}`);
+          if (source !== sharedSource && !source.startsWith(`${sharedSource}@`) && !fromCheckout) continue;
           // Only when the folder it was installed from is gone (it was deleted):
           // a folder that still exists belongs to another group's copy.
-          const folder = installedFolder(plugin);
+          const folder = fromCheckout ? path.relative(sharedCheckout, plugin.rootDir).split(path.sep).join("/") : installedFolder(plugin);
           if (folder !== null && (await git(["cat-file", "-e", `HEAD:${inFolder(folder, "package.json")}`], packagesDir).then(() => true, () => false))) continue;
           try {
             await bb.sdk.plugins.remove({ pluginId: id });
@@ -2119,6 +2444,7 @@ export default async function plugin(bb: BbPluginApi) {
       group: { id: packages.group.id, name: packages.group.name, path: packages.group.path },
       groups,
       folders,
+      ...(await betaAndDevViews(packages, installedPlugins)),
       packages: await Promise.all(
         packages.specs.map(async (spec) => {
           const manifest = await syncMirror(spec)
@@ -2761,6 +3087,18 @@ export default async function plugin(bb: BbPluginApi) {
       clientOnly(context, "hub_group_subscribe");
       return setSubscribed(group, subscribed);
     },
+    hub_publish: ({ dir, group, beta }, context) => {
+      clientOnly(context, "hub_publish");
+      return publishPlugin(dir, { group, beta });
+    },
+    hub_promote: ({ plugin, group }, context) => {
+      clientOnly(context, "hub_promote");
+      return promoteBeta(plugin, group);
+    },
+    hub_beta: ({ pluginId, joined, resetData }, context) => {
+      clientOnly(context, "hub_beta");
+      return setBeta(pluginId, joined, resetData);
+    },
     hub_group_add: ({ name, id }, context) => {
       clientOnly(context, "hub_group_add");
       return addGroup(name, id);
@@ -2963,6 +3301,88 @@ export default async function plugin(bb: BbPluginApi) {
               exitCode: 0,
               stdout: `Unsubscribed from ${result.name} (${result.group}). Its plugins stay installed but stop updating; remove them with \`bb plugin remove <id>\` if you don't want them.`,
             };
+          },
+        }),
+        "plugin publish": cliCommand({
+          summary: "Publish a plugin you develop in your own folder to everyone in a group (or, with --beta, to its beta testers)",
+          description:
+            "Copies the folder into the group's plugins/<name> (or beta/<name> with --beta) and pushes, like `plugin add --force`, but refuses unless package.json's version is newer than the published copy (and, for a beta, than the stable copy), and lists what changed. Your own machine keeps running your folder.",
+          positionals: [{ name: "folder", description: "Your plugin folder, e.g. ~/code/my-plugin or .", required: true }],
+          options: {
+            beta: { type: "boolean", description: "Publish to the group's beta copy instead of the stable one" },
+            ...groupOption,
+            ...jsonOption,
+          },
+          async run({ positionals, options }, ctx) {
+            const published = await publishPlugin(path.resolve(ctx.cwd ?? process.cwd(), positionals.folder), { group: options.group, beta: options.beta }).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(published) };
+            return {
+              exitCode: published.sync?.outcome === "failed" ? 1 : 0,
+              stdout: [
+                published.commit === null
+                  ? `${published.folder} is unchanged; nothing to publish.`
+                  : `Published ${published.pluginId} ${published.from === null ? "" : `${published.from} → `}${published.to}${published.beta ? " (beta)" : ""} to ${published.folder}, commit ${published.commit}.`,
+                ...published.changes.map((line) => `  ${line}`),
+                `Every running hub ${published.beta ? "that joined the beta " : ""}has it by ${formatTime(published.guaranteedBy)}.`,
+              ].join("\n"),
+            };
+          },
+        }),
+        "plugin promote": cliCommand({
+          summary: "Make a group's beta copy of a plugin its stable copy (everyone gets it; beta testers keep their data)",
+          positionals: [{ name: "plugin", description: "The plugin id or its beta folder name", required: true }],
+          options: { ...groupOption, ...jsonOption },
+          async run({ positionals, options }) {
+            const promoted = await promoteBeta(positionals.plugin, options.group).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(promoted) };
+            return {
+              exitCode: 0,
+              stdout: `Promoted ${promoted.pluginId} ${promoted.version ?? ""} from ${promoted.from} to ${promoted.to}${promoted.commit ? `, commit ${promoted.commit}` : ""}. Every running hub has it by ${formatTime(promoted.guaranteedBy)}.`,
+            };
+          },
+        }),
+        beta: cliCommand({
+          summary: "List the beta copies in your subscribed groups and which ones this machine runs",
+          options: jsonOption,
+          async run({ options }) {
+            const views = await serialize(async () => {
+              fetchedThisRound.clear();
+              const installed = (await bb.sdk.plugins.list()).plugins;
+              const out: (BetaView & { group: string })[] = [];
+              for (const group of await subscribedGroups()) {
+                const packages = await loadPackages(group.id);
+                out.push(...(await betaAndDevViews(packages, installed)).betas.map((view) => ({ ...view, group: group.name })));
+              }
+              return out;
+            }).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(views) };
+            return {
+              exitCode: 0,
+              stdout: views.length === 0
+                ? "No beta copies in your groups. Publish one with `bb hub plugin publish <folder> --beta`."
+                : views
+                    .map((view) => `${view.joined ? "[joined]" : "[      ]"}  ${view.pluginId} beta ${view.version ?? "?"} (stable ${view.stableVersion ?? "none"}) — ${view.group}${view.running ? ", running here" : ""}${view.needsReset && !view.running ? ", joining resets its data once" : ""}`)
+                    .join("\n"),
+            };
+          },
+        }),
+        "beta join": cliCommand({
+          summary: "Run a plugin's beta copy on this machine (switching keeps its settings and data)",
+          positionals: [{ name: "plugin", description: "The plugin id", required: true }],
+          options: {
+            "reset-data": { type: "boolean", description: "Allow the one-time reinstall a plugin installed before betas existed needs (resets its settings and data)" },
+          },
+          async run({ positionals, options }) {
+            const result = await setBeta(positionals.plugin, true, options["reset-data"] === true).catch((cause) => { throw toCliError(cause); });
+            return { exitCode: 0, stdout: `Joined the beta of ${result.pluginId}; the hub switches it now. Check with \`bb hub beta\`.` };
+          },
+        }),
+        "beta leave": cliCommand({
+          summary: "Go back to a plugin's stable copy on this machine (keeps its settings and data)",
+          positionals: [{ name: "plugin", description: "The plugin id", required: true }],
+          async run({ positionals }) {
+            const result = await setBeta(positionals.plugin, false).catch((cause) => { throw toCliError(cause); });
+            return { exitCode: 0, stdout: `Left the beta of ${result.pluginId}; the hub switches it back to the stable copy now.` };
           },
         }),
         "group add": cliCommand({

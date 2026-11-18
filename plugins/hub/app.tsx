@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DragEvent, FormEvent, ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
-import type { PackageView, PluginFolder, rpcContract, Schedule, SyncReport, SyncResult } from "./server";
+import type { BetaView, DevPlugin, PackageView, PluginFolder, rpcContract, Schedule, SyncReport, SyncResult } from "./server";
 import { Button } from "@/components/ui/button";
 import { Glyph } from "@/components/glyph";
 import { Input } from "@/components/ui/input";
@@ -22,6 +22,8 @@ type HubData = {
   folders: PluginFolder[];
   packages: PackageView[];
   marketplace: MarketplaceView[];
+  betas: BetaView[];
+  devPlugins: DevPlugin[];
   lastSync: SyncReport | null;
   schedule: Schedule;
   hubVersion: string | null;
@@ -648,6 +650,193 @@ function SyncLine({ data, busy, rpc, run, syncing }: { data: HubData; busy: stri
 }
 
 // ---------------------------------------------------------------------------
+// Betas and publishing
+
+/** -1, 0 or 1, comparing dotted version numbers (a pre-release sorts before its release). */
+function compareVersions(a: string | null, b: string | null): number {
+  if (a === b) return 0;
+  if (a === null) return -1;
+  if (b === null) return 1;
+  const [mainA = "", preA] = a.split("-", 2);
+  const [mainB = "", preB] = b.split("-", 2);
+  const partsA = mainA.split(".").map(Number);
+  const partsB = mainB.split(".").map(Number);
+  for (let index = 0; index < Math.max(partsA.length, partsB.length); index += 1) {
+    const diff = (partsA[index] ?? 0) - (partsB[index] ?? 0);
+    if (diff !== 0) return Math.sign(diff);
+  }
+  if (preA === preB) return 0;
+  if (preA === undefined) return 1;
+  if (preB === undefined) return -1;
+  return preA < preB ? -1 : 1;
+}
+
+function Betas({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
+  const [confirmReset, setConfirmReset] = useState<BetaView | null>(null);
+  if (data.betas.length === 0) return null;
+  const toggle = (beta: BetaView, resetData = false) =>
+    void run(`beta:${beta.pluginId}`, () => rpc.call("hub_beta", { pluginId: beta.pluginId, joined: !beta.joined, ...(resetData ? { resetData } : {}) }));
+  return (
+    <>
+      <Title>Betas</Title>
+      <List>
+        {data.betas.map((beta) => (
+          <li key={beta.path} className="flex items-center gap-2 px-3 py-1.5 text-sm">
+            <span className="shrink-0 rounded bg-muted px-1 text-xs font-medium text-muted-foreground" title="Beta copy">β</span>
+            <span className="min-w-0 flex-1 truncate" title={beta.path}>
+              {beta.name}{" "}
+              <span className="text-xs text-muted-foreground">
+                {beta.version ?? "?"} (stable {beta.stableVersion ?? "none"}){beta.running ? " · running here" : beta.joined ? " · switching…" : ""}
+              </span>
+            </span>
+            <Button
+              size="sm"
+              variant={beta.joined ? "ghost" : "default"}
+              className="h-7 shrink-0"
+              disabled={busy !== null || !isSubscribed(data)}
+              onClick={() => (!beta.joined && beta.needsReset ? setConfirmReset(beta) : toggle(beta))}
+            >
+              {busy === `beta:${beta.pluginId}` ? "…" : beta.joined ? "Leave beta" : "Join beta"}
+            </Button>
+            <span title="Make this beta the stable copy for everyone" className="inline-flex">
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 shrink-0 text-muted-foreground"
+                disabled={busy !== null}
+                onClick={() => void run(`promote:${beta.pluginId}`, () => rpc.call("hub_promote", { plugin: beta.pluginId, group: data.group.id }))}
+              >
+                {busy === `promote:${beta.pluginId}` ? "…" : "Promote"}
+              </Button>
+            </span>
+          </li>
+        ))}
+      </List>
+      <Dialog open={confirmReset !== null} onOpenChange={(open) => (open ? null : setConfirmReset(null))}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Join the {confirmReset?.name} beta?</DialogTitle>
+            <DialogDescription>
+              {confirmReset?.name} was installed on this machine before betas existed, so joining reinstalls it once.{" "}
+              <strong>Its settings and data on this machine will be reset.</strong> After that, switching between the beta and the stable copy
+              keeps them.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirmReset(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                const beta = confirmReset;
+                setConfirmReset(null);
+                if (beta !== null) toggle(beta, true);
+              }}
+            >
+              Reset and join
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+type PublishTarget = { plugin: DevPlugin; beta: boolean };
+
+function DevPlugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
+  const [target, setTarget] = useState<PublishTarget | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  if (data.devPlugins.length === 0) return null;
+  const blocker = (plugin: DevPlugin, beta: boolean): string | null => {
+    const published = beta ? plugin.betaVersion : plugin.stableVersion;
+    if (published !== null && compareVersions(plugin.version, published) <= 0) return `Bump the version: ${plugin.version ?? "?"} isn't newer than the published ${published}.`;
+    if (beta && plugin.stableVersion !== null && compareVersions(plugin.version, plugin.stableVersion) <= 0) return `A beta must be newer than the stable ${plugin.stableVersion}.`;
+    return null;
+  };
+  const published = target === null ? null : target.beta ? target.plugin.betaVersion : target.plugin.stableVersion;
+  return (
+    <>
+      <Title>Your local plugins</Title>
+      <List>
+        {data.devPlugins.map((plugin) => (
+          <li key={plugin.pluginId} className="flex items-center gap-2 px-3 py-1.5 text-sm">
+            <Glyph name="Folder" className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate" title={plugin.dir}>
+              {plugin.name} <span className="text-xs text-muted-foreground">{plugin.version ?? "?"} here</span>
+              <span className="block truncate text-xs text-muted-foreground">
+                {data.group.name}: {plugin.stableVersion === null ? "not published" : `stable ${plugin.stableVersion}`}
+                {plugin.betaVersion === null ? "" : ` · beta ${plugin.betaVersion}`}
+              </span>
+            </span>
+            {(
+              [
+                [false, "Publish"],
+                [true, "Publish beta"],
+              ] as const
+            ).map(([beta, label]) => (
+              <span key={label} title={blocker(plugin, beta) ?? `${label} ${plugin.version ?? ""} to ${data.group.name}`} className="inline-flex">
+                <Button
+                  size="sm"
+                  variant={beta ? "ghost" : "default"}
+                  className="h-7 shrink-0"
+                  disabled={busy !== null || blocker(plugin, beta) !== null}
+                  onClick={() => setTarget({ plugin, beta })}
+                >
+                  {beta ? null : <Glyph name="Upload" className="size-3.5" />}
+                  {busy === `publish:${plugin.pluginId}:${beta}` ? "…" : label}
+                </Button>
+              </span>
+            ))}
+          </li>
+        ))}
+      </List>
+      {done === null ? null : <p className="mt-1 text-xs text-muted-foreground">{done}</p>}
+      <Dialog open={target !== null} onOpenChange={(open) => (open ? null : setTarget(null))}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              Publish {target?.plugin.name} {target?.plugin.version}
+              {target?.beta ? " as a beta" : ""}?
+            </DialogTitle>
+            <DialogDescription>
+              {target?.beta
+                ? `Copies ${target.plugin.dir} into ${data.group.name}'s beta. Only machines that joined its beta get it, at the next sync, and they keep their data.`
+                : `Copies ${target?.plugin.dir ?? ""} into ${data.group.name} for everyone subscribed to it, at the next sync. They keep their data.`}{" "}
+              {published === null ? "This is its first release there." : `It replaces ${published}.`} Your machine keeps running your folder.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const chosen = target;
+                setTarget(null);
+                if (chosen === null) return;
+                setDone(null);
+                void run(`publish:${chosen.plugin.pluginId}:${chosen.beta}`, async () => {
+                  const result = await rpc.call("hub_publish", { dir: chosen.plugin.dir, group: data.group.id, beta: chosen.beta });
+                  setDone(
+                    result.commit === null
+                      ? `${result.folder} is unchanged.`
+                      : `Published ${result.pluginId} ${result.to}${result.beta ? " (beta)" : ""}: ${result.changes.at(-1) ?? "no file changes"}. Everyone ${result.beta ? "on the beta " : ""}has it by ${time(Date.parse(result.guaranteedBy))}.`,
+                  );
+                });
+              }}
+            >
+              Publish
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 4. Add a plugin: drop a folder or .zip, or paste a URL
 
 const SKIPPED = new Set(["node_modules", "dist", ".git", ".claude"]);
@@ -932,7 +1121,9 @@ function HubPage() {
             <GroupSelector data={data} selected={group} onSelect={selectGroup} busy={busy} rpc={rpc} run={run} loading={loading} syncing={syncing} onSubscribed={onSubscribed} />
             <div className={cn("transition-opacity", loading && "pointer-events-none opacity-40")} aria-busy={loading}>
               <Plugins data={data} busy={busy} rpc={rpc} run={run} />
+              <Betas data={data} busy={busy} rpc={rpc} run={run} />
               <MarketplacePlugins data={data} busy={busy} rpc={rpc} run={run} />
+              <DevPlugins data={data} busy={busy} rpc={rpc} run={run} />
               <SyncLine data={data} busy={busy} rpc={rpc} run={run} syncing={syncing} />
               <AddPlugin busy={busy} rpc={rpc} run={run} group={data.group} />
               <AddFromMarketplace data={data} busy={busy} rpc={rpc} run={run} />

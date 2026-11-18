@@ -210,6 +210,26 @@ never switched automatically, because switching reinstalls it and resets its
 data. A group's `uninstall` list only removes plugins installed from that
 group's own folders.
 
+### Publishing, betas, promoting
+
+```sh
+bb hub plugin publish <folder> [--beta] [--group <id>]   # copy a development folder in; version must be newer
+bb hub plugin promote <plugin-id> [--group <id>]         # beta/<name> becomes the stable copy
+bb hub beta                                              # betas in the subscribed groups
+bb hub beta join <plugin-id> [--reset-data]              # run the beta here (setting "beta"; "*" = all)
+bb hub beta leave <plugin-id>
+```
+
+Beta copies live in `<group>/beta/<name>`. A machine that joined a plugin's
+beta runs the newest beta copy unless the stable copy is newer. The hub
+installs shared-repository plugins as path installs from its checkout
+(`follow/<owner>/<name>` next to the mirrors), so switching copies (beta,
+stable, another group's) moves the plugin and keeps its settings and data.
+Plugins installed from git before that keep their git install; joining a beta
+for one needs `--reset-data` (one reinstall, data reset). Plugins a machine
+runs from its own folder (`bb plugin install .`) are left alone and listed on
+the page under **Your local plugins** with Publish buttons.
+
 ### Moving between groups
 
 ```sh
