@@ -376,6 +376,18 @@ export const rpcContract = defineRpcContract({
     input: z.object({ group: z.string().trim().min(1).max(64), subscribed: z.boolean() }),
     output: z.object({ group: z.string(), name: z.string(), subscribed: z.boolean(), guaranteedBy: z.string() }),
   },
+  hub_group_add: {
+    input: z.object({ name: z.string().trim().min(1).max(60), id: z.string().trim().max(64).optional() }),
+    output: z.object({ id: z.string(), name: z.string(), path: z.string(), commit: z.string().nullable() }),
+  },
+  hub_group_rename: {
+    input: z.object({ group: z.string().trim().min(1).max(64), name: z.string().trim().min(1).max(60) }),
+    output: z.object({ id: z.string(), from: z.string(), name: z.string(), commit: z.string().nullable() }),
+  },
+  hub_group_remove: {
+    input: z.object({ group: z.string().trim().min(1).max(64) }),
+    output: z.object({ id: z.string(), name: z.string(), commit: z.string().nullable(), guaranteedBy: z.string() }),
+  },
   hub_marketplace_add: {
     input: z.object({ entry: z.string().trim().min(1).max(200), group: z.string().trim().max(64).optional() }),
     output: z.object({
@@ -1214,6 +1226,147 @@ export default async function plugin(bb: BbPluginApi) {
     return { ...outcome, guaranteedBy: scheduleView(null).guaranteedBy, results: report.results.length };
   }
 
+  // -------------------------------------------------------------------------
+  // Managing groups. A group's id and folder never change (machines subscribe
+  // by id, and its marketplace is named after it); renaming changes only its
+  // display name.
+
+  const groupIdFromName = (name: string) =>
+    name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 64).replace(/-+$/u, "");
+  const cleanGroupName = (name: string) => {
+    const trimmed = name.replace(/\s+/gu, " ").trim();
+    if (trimmed === "" || trimmed.length > 60) throw new Error("A group name must be 1 to 60 characters.");
+    return trimmed;
+  };
+  const groupComment = (name: string, id: string) =>
+    `The ${name} group. Same format as the root packages.json: include/exclude are relative to this folder, and local plugins go in ./plugins/<name>. Machines that run \`bb hub group subscribe ${id}\` install these.`;
+  const nameTaken = (groups: Group[], name: string, except?: string) =>
+    groups.some((group) => group.id !== except && group.name.toLowerCase() === name.toLowerCase());
+
+  /** Add an empty group: a folder groups/<id> with its packages.json, listed in the root packages.json. */
+  async function addGroup(rawName: string, rawId?: string) {
+    const outcome = await serialize(async () => {
+      const name = cleanGroupName(rawName);
+      const id = (rawId?.trim().toLowerCase() || groupIdFromName(name));
+      if (!GROUP_ID_PATTERN.test(id)) {
+        throw new Error(`"${id}" can't be a group id: use lowercase letters, digits and dashes${rawId ? "" : " (give one with --id)"}.`);
+      }
+      if (id === HOME_GROUP) throw new Error(`"${HOME_GROUP}" is the home group's id.`);
+      const { packagesRepo } = await readConfig();
+      const work = await workingClone(packagesRepo);
+      const groups = await listGroups();
+      if (groups.some((group) => group.id === id)) throw new Error(`There is already a group with the id "${id}".`);
+      if (nameTaken(groups, name)) throw new Error(`There is already a group called ${name}.`);
+      const folder = `groups/${id}`;
+      if (await access(path.join(work, folder)).then(() => true, () => false)) {
+        throw new Error(`${folder} already exists in the repository; pick another id.`);
+      }
+      const root = await readJsonFile(path.join(work, "packages.json"));
+      root.groups = [...entries(root, "groups"), { id, name, path: folder }];
+      await mkdir(path.join(work, folder), { recursive: true });
+      await writeJsonFile(path.join(work, folder, "packages.json"), {
+        $comment: groupComment(name, id),
+        name,
+        include: [`${PLUGINS_FOLDER}/*`],
+        exclude: [],
+        remote: [],
+        uninstall: [],
+        marketplace: [],
+      });
+      await writeJsonFile(path.join(work, "packages.json"), root);
+      const commit = await commitAndPush(work, [folder, "packages.json"], `Add group ${name} (${id})`, packagesRepo);
+      bb.log.info(`added group ${id} (${commit ?? "no change"})`);
+      return { id, name, path: folder, commit };
+    });
+    bb.realtime.publish(HUB_CHANGED, { group: outcome.id });
+    return outcome;
+  }
+
+  /** Rename a group (its display name only; the id and folder stay). The home group can be renamed too. */
+  async function renameGroup(groupId: string, rawName: string) {
+    const outcome = await serialize(async () => {
+      const name = cleanGroupName(rawName);
+      const { packagesRepo } = await readConfig();
+      const work = await workingClone(packagesRepo);
+      const groups = await listGroups();
+      const group = await findGroup(groupId);
+      if (group.name === name) return { id: group.id, from: group.name, name, commit: null };
+      if (nameTaken(groups, name, group.id)) throw new Error(`There is already a group called ${name}.`);
+      const root = await readJsonFile(path.join(work, "packages.json"));
+      const paths = ["packages.json"];
+      if (group.id === HOME_GROUP) {
+        root.name = name;
+      } else {
+        root.groups = entries(root, "groups").map((entry) => (String(entry.id ?? "").toLowerCase() === group.id ? { ...entry, name } : entry));
+        const file = path.join(work, inGroup(group, "packages.json"));
+        const document = await readJsonFile(file).catch(() => null);
+        if (document !== null) {
+          document.name = name;
+          if (typeof document.$comment === "string") document.$comment = groupComment(name, group.id);
+          await writeJsonFile(file, document);
+          paths.push(inGroup(group, "packages.json"));
+        }
+      }
+      await writeJsonFile(path.join(work, "packages.json"), root);
+      const commit = await commitAndPush(work, paths, `Rename group ${group.name} to ${name}`, packagesRepo);
+      bb.log.info(`renamed group ${group.id} to ${name} (${commit ?? "no change"})`);
+      return { id: group.id, from: group.name, name, commit };
+    });
+    bb.realtime.publish(HUB_CHANGED, { group: outcome.id });
+    return outcome;
+  }
+
+  /**
+   * Remove a group. Only an empty one: it must have no plugin folders and no
+   * local, remote or marketplace plugins, so removing it can't lose a plugin
+   * or its data. Move or delete them first.
+   */
+  async function removeGroup(groupId: string) {
+    const outcome = await serialize(async () => {
+      const group = await findGroup(groupId);
+      if (group.id === HOME_GROUP) throw new Error("The home group can't be removed.");
+      const { packagesRepo } = await readConfig();
+      const work = await workingClone(packagesRepo);
+      const document = (await readJsonFile(path.join(work, inGroup(group, "packages.json"))).catch(() => null)) ?? {};
+      const folders = (await readdir(path.join(work, inGroup(group, PLUGINS_FOLDER)), { withFileTypes: true }).catch(() => []))
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => inGroup(group, `${PLUGINS_FOLDER}/${entry.name}`));
+      const contents = [
+        ...folders,
+        ...entries(document, "local").map((entry) => String(entry.path ?? "")),
+        ...[...entries(document, "remote"), ...entries(document, "plugins")].map((entry) => `${String(entry.repo ?? "")}${entry.path ? `/${String(entry.path)}` : ""}`),
+        ...entries(document, "marketplace").map((entry) => `${String(entry.id ?? "")}${entry.marketplace ? `@${String(entry.marketplace)}` : ""}`),
+      ];
+      if (contents.length > 0) {
+        throw new Error(
+          `${group.name} still has plugins: ${contents.join(", ")}. Move them to another group or delete them first, so no plugin or its data is lost.`,
+        );
+      }
+      const root = await readJsonFile(path.join(work, "packages.json"));
+      root.groups = entries(root, "groups").filter((entry) => String(entry.id ?? "").toLowerCase() !== group.id);
+      await writeJsonFile(path.join(work, "packages.json"), root);
+      await rm(path.join(work, group.path), { recursive: true, force: true });
+      const commit = await commitAndPush(work, [group.path, "packages.json"], `Remove group ${group.name} (${group.id})`, packagesRepo);
+      bb.log.info(`removed group ${group.id} (${commit ?? "no change"})`);
+      return { id: group.id, name: group.name, commit };
+    });
+    // This machine forgets it now; other machines drop its marketplace at their next sync.
+    await forgetRemovedGroup(outcome.id);
+    const { subscribed } = await readConfig();
+    if (subscribed.includes(outcome.id)) await settings.experimental_set({ groups: subscribed.filter((id) => id !== outcome.id).join(",") });
+    bb.realtime.publish(HUB_CHANGED, { group: outcome.id });
+    return { ...outcome, guaranteedBy: scheduleView(null).guaranteedBy };
+  }
+
+  /** Take a removed group's marketplace out of Settings → Plugin marketplaces, if the hub added it. */
+  async function forgetRemovedGroup(groupId: string) {
+    const key = `${MARKETPLACE_REFRESHED_KEY}:${groupId}`;
+    if ((await bb.storage.kv.get<string>(key)) == null) return;
+    await bb.sdk.plugins.marketplaces.remove({ name: `bb-plugins-${groupId}` }).catch(() => undefined);
+    await bb.storage.kv.delete(key);
+    bb.log.info(`group ${groupId} was removed; took its marketplace out of Settings`);
+  }
+
   async function addMarketplacePlugin(arg: string, groupId?: string) {
     const wanted = parseEntryArg(arg);
     const outcome = await serialize(async () => {
@@ -1320,10 +1473,14 @@ export default async function plugin(bb: BbPluginApi) {
     let startSelfUpdate = false;
     let packagesDir: string | null = null;
     try {
-      const { packagesRepo } = await readConfig();
+      const { packagesRepo, subscribed } = await readConfig();
       const groups = await subscribedGroups();
       const allGroups = await listGroups();
       packagesDir = await syncMirror(packagesRepo);
+      // A subscribed group that was removed from the repository: drop its marketplace.
+      for (const id of subscribed.filter((candidate) => !allGroups.some((group) => group.id === candidate))) {
+        await forgetRemovedGroup(id).catch(() => undefined);
+      }
       const loaded: Awaited<ReturnType<typeof loadPackages>>[] = [];
       for (const group of groups) {
         try {
@@ -2125,6 +2282,18 @@ export default async function plugin(bb: BbPluginApi) {
       clientOnly(context, "hub_group_subscribe");
       return setSubscribed(group, subscribed);
     },
+    hub_group_add: ({ name, id }, context) => {
+      clientOnly(context, "hub_group_add");
+      return addGroup(name, id);
+    },
+    hub_group_rename: ({ group, name }, context) => {
+      clientOnly(context, "hub_group_rename");
+      return renameGroup(group, name);
+    },
+    hub_group_remove: ({ group }, context) => {
+      clientOnly(context, "hub_group_remove");
+      return removeGroup(group);
+    },
     hub_install: ({ path: folder }, context) => {
       clientOnly(context, "hub_install");
       return installFolder(folder);
@@ -2314,6 +2483,49 @@ export default async function plugin(bb: BbPluginApi) {
             return {
               exitCode: 0,
               stdout: `Unsubscribed from ${result.name} (${result.group}). Its plugins stay installed but stop updating; remove them with \`bb plugin remove <id>\` if you don't want them.`,
+            };
+          },
+        }),
+        "group add": cliCommand({
+          summary: "Add an empty group to the shared repository (commits and pushes)",
+          description: "Creates groups/<id> with its packages.json and lists it in the root packages.json. The id comes from the name unless --id is given; it never changes afterwards.",
+          positionals: [{ name: "name", description: 'The display name, e.g. "Lean Software Designers"', required: true, variadic: true }],
+          options: { id: { type: "string", placeholder: "id", description: "The group id (lowercase letters, digits, dashes); default: from the name" }, ...jsonOption },
+          async run({ positionals, options }) {
+            const added = await addGroup(positionals.name.join(" "), options.id).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(added) };
+            return {
+              exitCode: 0,
+              stdout: `Added group ${added.name} (${added.id}) in ${added.path}${added.commit ? `, commit ${added.commit}` : ""}. Subscribe a machine with \`bb hub group subscribe ${added.id}\`.`,
+            };
+          },
+        }),
+        "group rename": cliCommand({
+          summary: "Rename a group (its display name; the id and folder stay, so subscriptions keep working)",
+          positionals: [
+            { name: "group", description: "The group id (see `bb hub group`)", required: true },
+            { name: "name", description: "The new display name", required: true, variadic: true },
+          ],
+          options: jsonOption,
+          async run({ positionals, options }) {
+            const renamed = await renameGroup(positionals.group, positionals.name.join(" ")).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(renamed) };
+            return {
+              exitCode: 0,
+              stdout: renamed.commit === null ? `${renamed.id} is already called ${renamed.name}.` : `Renamed ${renamed.from} to ${renamed.name} (${renamed.id}), commit ${renamed.commit}.`,
+            };
+          },
+        }),
+        "group remove": cliCommand({
+          summary: "Remove an empty group from the shared repository (move or delete its plugins first)",
+          positionals: [{ name: "group", description: "The group id", required: true }],
+          options: jsonOption,
+          async run({ positionals, options }) {
+            const removed = await removeGroup(positionals.group).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(removed) };
+            return {
+              exitCode: 0,
+              stdout: `Removed group ${removed.name} (${removed.id})${removed.commit ? `, commit ${removed.commit}` : ""}. Subscribed hubs drop it by ${formatTime(removed.guaranteedBy)}.`,
             };
           },
         }),

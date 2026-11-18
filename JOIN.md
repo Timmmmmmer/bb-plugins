@@ -45,6 +45,15 @@ The Plugin hub page has the same choice in the selector at the top. Whatever
 you add or delete on the page goes to the group selected there. On the CLI,
 use `--group <id>`, e.g. `bb hub plugin add ~/code/my-plugin --group lean-software-student`.
 
+To add, rename or remove a group, use the +, ✎ and 🗑 buttons next to the
+selector, or:
+
+```sh
+bb hub group add "Lean Software Designers"           # id: lean-software-designers
+bb hub group rename lean-software-student "Students" # only the name changes; subscriptions keep working
+bb hub group remove lean-software-designers          # only when it's empty: move or delete its plugins first
+```
+
 If the same plugin is in more than one of your groups, the newest version wins.
 If you already have it from one group and a newer copy appears in another, the
 hub tells you instead of switching (switching reinstalls the plugin, which

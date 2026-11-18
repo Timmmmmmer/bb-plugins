@@ -168,7 +168,17 @@ bb hub group [--json]               # groups and this machine's subscriptions
 bb hub group subscribe <id>         # install and update that group's plugins here
 bb hub group unsubscribe <id>       # stop (its plugins stay installed); its marketplace leaves Settings
 bb hub packages [--group <id>]      # what each subscribed group lists
+bb hub group add <name> [--id <id>] # new empty group in groups/<id> (id from the name by default)
+bb hub group rename <id> <name>     # display name only; id, folder and subscriptions stay (home too)
+bb hub group remove <id>            # only an empty group: move or delete its plugins first
 ```
+
+A group's id and folder never change: machines subscribe by id and its
+marketplace is named after it. Removing a group drops it from the root
+`packages.json` and deletes its folder; subscribed hubs take its marketplace out
+of Settings at their next sync (the machine that removed it, right away). The
+Plugin hub page has ✎ (rename), 🗑 (remove) and + (add) next to the group
+selector.
 
 Every command that changes the repository takes `--group <id>` (default home):
 `plugin add/remove/delete`, `marketplace add/remove`, `list`, `marketplace`.

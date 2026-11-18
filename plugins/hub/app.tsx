@@ -172,6 +172,18 @@ function Empty({ children }: { children: ReactNode }) {
 // ---------------------------------------------------------------------------
 // 0. Group selector
 
+type GroupEdit = { mode: "add" } | { mode: "rename"; group: GroupView } | { mode: "remove"; group: GroupView };
+
+function IconButton({ label, glyph, onClick, disabled }: { label: string; glyph: "Plus" | "Pencil" | "Trash2"; onClick: () => void; disabled?: boolean }) {
+  return (
+    <span title={label} className="inline-flex">
+      <Button size="icon" variant="ghost" className="size-8 shrink-0 text-muted-foreground" aria-label={label} disabled={disabled} onClick={onClick}>
+        <Glyph name={glyph} className="size-3.5" />
+      </Button>
+    </span>
+  );
+}
+
 function GroupSelector({
   data,
   selected,
@@ -188,6 +200,30 @@ function GroupSelector({
   run: Run;
 }) {
   const current = data.groups.find((group) => group.id === selected) ?? data.groups[0];
+  const [edit, setEdit] = useState<GroupEdit | null>(null);
+  const [name, setName] = useState("");
+  const open = (next: GroupEdit) => {
+    setName(next.mode === "rename" ? next.group.name : "");
+    setEdit(next);
+  };
+  const submit = (event?: FormEvent) => {
+    event?.preventDefault();
+    const target = edit;
+    const trimmed = name.trim();
+    setEdit(null);
+    if (target === null) return;
+    if (target.mode === "add" && trimmed !== "") {
+      void run("group:add", async () => onSelect((await rpc.call("hub_group_add", { name: trimmed })).id));
+    } else if (target.mode === "rename" && trimmed !== "" && trimmed !== target.group.name) {
+      void run(`group:rename:${target.group.id}`, () => rpc.call("hub_group_rename", { group: target.group.id, name: trimmed }));
+    } else if (target.mode === "remove") {
+      void run(`group:remove:${target.group.id}`, async () => {
+        await rpc.call("hub_group_remove", { group: target.group.id });
+        onSelect("home");
+      });
+    }
+  };
+  const empty = data.packages.length === 0 && data.marketplace.length === 0 && data.folders.length === 0;
   return (
     <div className="mt-3">
       <div className="flex items-center gap-2">
@@ -220,12 +256,73 @@ function GroupSelector({
             {busy === `subscribe:${current.id}` ? "…" : current.subscribed ? "Unsubscribe" : "Subscribe"}
           </Button>
         )}
+        <div className="flex shrink-0 items-center">
+          {current === undefined ? null : (
+            <IconButton label="Rename group" glyph="Pencil" disabled={busy !== null} onClick={() => open({ mode: "rename", group: current })} />
+          )}
+          {current === undefined || current.home ? null : (
+            <IconButton label="Remove group" glyph="Trash2" disabled={busy !== null} onClick={() => open({ mode: "remove", group: current })} />
+          )}
+          <IconButton label="Add a group" glyph="Plus" disabled={busy !== null} onClick={() => open({ mode: "add" })} />
+        </div>
       </div>
       {current !== undefined && !current.subscribed ? (
         <p className="mt-1 text-xs text-muted-foreground">
           This machine isn't subscribed to {current.name}, so it doesn't install these plugins. Subscribe to get them.
         </p>
       ) : null}
+      <Dialog open={edit !== null} onOpenChange={(isOpen) => (isOpen ? null : setEdit(null))}>
+        <DialogContent>
+          {edit?.mode === "remove" ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Remove {edit.group.name}?</DialogTitle>
+                <DialogDescription>
+                  {empty
+                    ? "This removes the empty group from the shared repository. Machines subscribed to it stop seeing it at their next sync."
+                    : `${edit.group.name} still has plugins. Move them to another group or delete them first, so no plugin or its data is lost.`}
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button variant="ghost" onClick={() => setEdit(null)}>
+                  Cancel
+                </Button>
+                <Button variant="destructive" disabled={!empty || busy !== null} onClick={() => submit()}>
+                  Remove group
+                </Button>
+              </DialogFooter>
+            </>
+          ) : edit !== null ? (
+            <form onSubmit={submit}>
+              <DialogHeader>
+                <DialogTitle>{edit.mode === "add" ? "Add a group" : `Rename ${edit.group.name}`}</DialogTitle>
+                <DialogDescription>
+                  {edit.mode === "add"
+                    ? "A new, empty group in the shared repository. Members subscribe to it to get its plugins."
+                    : "Only the name changes. Subscriptions keep working."}
+                </DialogDescription>
+              </DialogHeader>
+              <Input
+                autoFocus
+                className="my-3"
+                value={name}
+                maxLength={60}
+                placeholder="Group name"
+                aria-label="Group name"
+                onChange={(event) => setName(event.target.value)}
+              />
+              <DialogFooter>
+                <Button type="button" variant="ghost" onClick={() => setEdit(null)}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={name.trim() === "" || busy !== null}>
+                  {edit.mode === "add" ? "Add group" : "Rename"}
+                </Button>
+              </DialogFooter>
+            </form>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
