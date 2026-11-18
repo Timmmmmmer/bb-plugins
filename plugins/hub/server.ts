@@ -925,7 +925,8 @@ export default async function plugin(bb: BbPluginApi) {
   /** Run a program for a followed repository's build; rejects with the tail of its output. */
   function runTool(command: string, args: string[], cwd: string): Promise<void> {
     const bin = path.dirname(process.execPath);
-    const env: NodeJS.ProcessEnv = { ...process.env, CI: "1", PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`, npm_config_audit: "false", npm_config_fund: "false" };
+    // bb's server runs with NODE_ENV=production, which makes package managers skip devDependencies (builds need them).
+    const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: "development", npm_config_production: "false", CI: "1", PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`, npm_config_audit: "false", npm_config_fund: "false" };
     return new Promise((resolve, reject) => {
       execFile(command, args, { cwd, env, timeout: FOLLOW_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
         if (error) {
@@ -982,9 +983,9 @@ export default async function plugin(bb: BbPluginApi) {
     } else if (await exists(path.join(folder, "yarn.lock"))) {
       await runTool(await npm(), ["exec", "--yes", "--", "yarn@1", "install", "--ignore-scripts", "--frozen-lockfile"], folder);
     } else if (await exists(path.join(folder, "package-lock.json"))) {
-      await runTool(await npm(), ["ci", "--ignore-scripts"], folder);
+      await runTool(await npm(), ["ci", "--ignore-scripts", "--include=dev"], folder);
     } else {
-      await runTool(await npm(), ["install", "--ignore-scripts", "--no-package-lock"], folder);
+      await runTool(await npm(), ["install", "--ignore-scripts", "--include=dev", "--no-package-lock"], folder);
     }
   }
 
