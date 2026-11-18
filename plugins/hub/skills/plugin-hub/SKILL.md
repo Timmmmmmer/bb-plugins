@@ -231,9 +231,7 @@ Plugins installed from git before that keep their git install; joining a beta
 for one needs `--reset-data` (one reinstall, data reset). Plugins a machine
 runs from its own folder (`bb plugin install .`) are left alone and listed on
 the page under **Your local plugins** with Publish buttons, and under the
-**Publish** button in the left sidebar's footer. With the setting
-`publishInSidePanel` (the "Publish only from the sidebar footer" checkbox)
-the page shows only a pointer to that footer button.
+**Publish** button in the left sidebar's footer.
 
 ### Moving between groups
 

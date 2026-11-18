@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-hub",
-  "version": "2.9.0",
+  "version": "2.9.1",
   "type": "module",
   "engines": {
     "bb": ">=0.47.1",
@@ -10,7 +10,11 @@
     "name": "Hub",
     "description": "Keeps the bb plugins from a shared public repository installed and up to date, with no tokens.",
     "branding": {
-      "icon": "./assets/icon.svg"
+      "icon": "./assets/icon.svg",
+      "experimental_icons": {
+        "publish": "./assets/publish.svg",
+        "hub": "./assets/icon.svg"
+      }
     },
     "server": "./server.ts",
     "app": "./app.tsx"

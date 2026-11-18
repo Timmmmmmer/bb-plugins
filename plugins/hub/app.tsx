@@ -751,50 +751,23 @@ function Betas({ data, busy, rpc, run }: { data: HubData; busy: string | null; r
 
 type PublishTarget = { plugin: DevPlugin; beta: boolean };
 
-/** The "Publish in the side panel" option, as a checkbox. */
-function SidePanelOption({ on, busy, rpc, run }: { on: boolean; busy: string | null; rpc: Rpc; run: Run }) {
-  return (
-    <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-      <input
-        type="checkbox"
-        checked={on}
-        disabled={busy !== null}
-        onChange={(event) => void run("sidepanel", () => rpc.call("hub_publish_in_side_panel", { on: event.target.checked }))}
-      />
-      Publish only from the sidebar footer (the Publish button next to Settings)
-    </label>
-  );
-}
-
 function DevPlugins({
   data,
   busy,
   rpc,
   run,
-  sidePanel,
   inSidePanel = false,
 }: {
   data: HubData;
   busy: string | null;
   rpc: Rpc;
   run: Run;
-  /** Whether the option to publish from the side panel is on. */
-  sidePanel: boolean;
-  /** Rendered in the side panel's Publish tab (rather than on the Plugin hub page). */
+  /** Rendered in the sidebar footer's Publish panel (rather than on the Plugin hub page). */
   inSidePanel?: boolean;
 }) {
   const [target, setTarget] = useState<PublishTarget | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [folder, setFolder] = useState("");
-  if (sidePanel && !inSidePanel) {
-    return (
-      <>
-        <Title>Your local plugins</Title>
-        <Empty>Publishing is in the left sidebar: click the Publish button in its footer, next to Settings.</Empty>
-        <SidePanelOption on={sidePanel} busy={busy} rpc={rpc} run={run} />
-      </>
-    );
-  }
   const blocker = (plugin: DevPlugin, beta: boolean): string | null => {
     const published = beta ? plugin.betaVersion : plugin.stableVersion;
     if (published !== null && compareVersions(plugin.version, published) <= 0) return `Bump the version: ${plugin.version ?? "?"} isn't newer than the published ${published}.`;
@@ -883,7 +856,6 @@ function DevPlugins({
           {busy === "devstart" ? "…" : "Develop"}
         </Button>
       </form>
-      <SidePanelOption on={sidePanel} busy={busy} rpc={rpc} run={run} />
       {done === null ? null : <p className="mt-1 text-xs text-muted-foreground">{done}</p>}
       <Dialog open={target !== null} onOpenChange={(open) => (open ? null : setTarget(null))}>
         <DialogContent>
@@ -1152,13 +1124,11 @@ function HubPage() {
   const [syncing, setSyncing] = useState<Syncing>(null);
   // The hub updating itself (it reloads; calls fail for a moment while it restarts).
   const [updating, setUpdating] = useState(false);
-  const [sidePanel, setSidePanel] = useState(false);
   const refreshStatus = useCallback(() => {
     rpc.call("hub_status", null).then(
       (status) => {
         setSyncing(status.syncing);
         setUpdating(status.updating !== null);
-        setSidePanel(status.publishInSidePanel);
       },
       () => undefined,
     );
@@ -1248,7 +1218,7 @@ function HubPage() {
               <Plugins data={data} busy={busy} rpc={rpc} run={run} />
               <Betas data={data} busy={busy} rpc={rpc} run={run} />
               <MarketplacePlugins data={data} busy={busy} rpc={rpc} run={run} />
-              <DevPlugins data={data} busy={busy} rpc={rpc} run={run} sidePanel={sidePanel} />
+              <DevPlugins data={data} busy={busy} rpc={rpc} run={run} />
               <SyncLine data={data} busy={busy} rpc={rpc} run={run} syncing={syncing} />
               <AddPlugin busy={busy} rpc={rpc} run={run} group={data.group} />
               <AddFromMarketplace data={data} busy={busy} rpc={rpc} run={run} />
@@ -1263,17 +1233,6 @@ function HubPage() {
 // ---------------------------------------------------------------------------
 // The Publish button in the sidebar footer (a disclosure above the footer row)
 
-function useSidePanelOption(): boolean {
-  const rpc = useRpc<typeof rpcContract>();
-  const [on, setOn] = useState(false);
-  const load = useCallback(() => {
-    rpc.call("hub_status", null).then((status) => setOn(status.publishInSidePanel), () => undefined);
-  }, [rpc]);
-  useEffect(load, [load]);
-  useRealtime("hub-changed", load);
-  return on;
-}
-
 function PublishFooter() {
   const rpc = useRpc<typeof rpcContract>();
   const [data, setData] = useState<HubData | null>(null);
@@ -1286,7 +1245,6 @@ function PublishFooter() {
       return "home";
     }
   });
-  const sidePanel = useSidePanelOption();
   const refetch = useCallback(() => {
     rpc.call("hub_list", { group }).then(
       (result) => {
@@ -1337,7 +1295,7 @@ function PublishFooter() {
               ))}
             </select>
           </label>
-          <DevPlugins data={data} busy={busy} rpc={rpc} run={run} sidePanel={sidePanel} inSidePanel />
+          <DevPlugins data={data} busy={busy} rpc={rpc} run={run} inSidePanel />
         </>
       )}
     </div>
@@ -1349,8 +1307,9 @@ export default definePluginApp((app) => {
     kind: "disclosure",
     id: "publish",
     label: "Publish your plugins (Plugin hub)",
-    icon: "Upload",
+    // The hub's own icon (bb.branding.experimental_icons): bb's icon set has no upload icon.
+    icon: "hub/publish",
     component: PublishFooter,
   });
-  app.slots.navPanel({ id: "plugin-hub", title: "Plugin hub", icon: "Package", path: "plugin-hub", component: HubPage });
+  app.slots.navPanel({ id: "plugin-hub", title: "Plugin hub", icon: "hub/hub", path: "plugin-hub", component: HubPage });
 });
