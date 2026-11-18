@@ -62,8 +62,8 @@ function Spinner({ children }: { children: ReactNode }) {
 }
 
 const PROBLEM: SyncResult["outcome"][] = ["failed", "other-source"];
-/** Red for a failure, a muted orange (orange blended with the muted text colour) for a plugin installed from another source. */
-const WARNING_TEXT = "text-[color-mix(in_oklch,var(--color-orange-500)_60%,var(--muted-foreground))]";
+/** Red for a failure, a muted orange (orange blended with the muted text colour in OKLab, so the hue stays orange) for a plugin installed from another source. */
+const WARNING_TEXT = "text-[color-mix(in_oklab,var(--color-orange-500)_65%,var(--muted-foreground))]";
 const outcomeClass = (outcome: SyncResult["outcome"] | null) =>
   outcome === "failed" ? "text-destructive" : outcome === "other-source" ? WARNING_TEXT : "text-muted-foreground";
 const groupClass = (status: GroupView["status"] | undefined) => (status === "error" ? "text-destructive" : status === "warning" ? WARNING_TEXT : undefined);
