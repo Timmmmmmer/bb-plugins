@@ -15,6 +15,10 @@
     {
       "id": "breathe",
       "marketplace": "bb-community"
+    },
+    {
+      "id": "turn-tps",
+      "marketplace": "bb-community"
     }
   ]
 }
