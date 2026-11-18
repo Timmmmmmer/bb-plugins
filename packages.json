@@ -11,6 +11,11 @@
       "id": "lean-software-student",
       "name": "Lean Software Student Course 1",
       "path": "groups/lean-software-student"
+    },
+    {
+      "id": "mrdavidlaing",
+      "name": "mrdavidlaing",
+      "path": "groups/mrdavidlaing"
     }
   ],
   "syncIntervalMinutes": 15,
