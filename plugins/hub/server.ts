@@ -1240,6 +1240,15 @@ export default async function plugin(bb: BbPluginApi) {
     // from git before that keep their git install.
     if (isLocal(spec, await readConfig().then((config) => config.packagesRepo))) {
       if (installed === undefined || (await inHubCheckout(installed.rootDir))) return installFollowed(spec, label, pluginId);
+      if (installed.source.startsWith("path:")) {
+        return {
+          repo: label,
+          pluginId,
+          outcome: "other-source",
+          detail: `You run it from your own folder ${installed.rootDir}, so the hub leaves it alone. Publish it with \`bb hub plugin publish ${installed.rootDir}\` (or Publish on the Plugin hub page).`,
+          version: installed.version,
+        };
+      }
       if (spec.beta && isHubSource(installed.source, spec)) {
         const resetKey = `${BETA_RESET_KEY}:${pluginId}`;
         if ((await bb.storage.kv.get<boolean>(resetKey)) === true) {
