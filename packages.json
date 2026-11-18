@@ -17,7 +17,9 @@
   "include": [
     "plugins/*"
   ],
-  "exclude": [],
+  "exclude": [
+    "plugins/server-badge"
+  ],
   "remote": [],
   "uninstall": [],
   "marketplace": [

@@ -8,5 +8,9 @@
   "remote": [],
   "uninstall": [],
   "marketplace": [],
-  "local": []
+  "local": [
+    {
+      "path": "plugins/server-badge"
+    }
+  ]
 }
