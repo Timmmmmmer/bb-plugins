@@ -748,7 +748,7 @@ type PublishTarget = { plugin: DevPlugin; beta: boolean };
 function DevPlugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
   const [target, setTarget] = useState<PublishTarget | null>(null);
   const [done, setDone] = useState<string | null>(null);
-  if (data.devPlugins.length === 0) return null;
+  const [folder, setFolder] = useState("");
   const blocker = (plugin: DevPlugin, beta: boolean): string | null => {
     const published = beta ? plugin.betaVersion : plugin.stableVersion;
     if (published !== null && compareVersions(plugin.version, published) <= 0) return `Bump the version: ${plugin.version ?? "?"} isn't newer than the published ${published}.`;
@@ -759,6 +759,12 @@ function DevPlugins({ data, busy, rpc, run }: { data: HubData; busy: string | nu
   return (
     <>
       <Title>Your local plugins</Title>
+      {data.devPlugins.length === 0 ? (
+        <Empty>
+          Plugins you develop in a folder on this machine show up here, with buttons to publish them. Enter a plugin folder below to run it
+          from there on this machine only (or run <code>bb plugin install .</code> in it).
+        </Empty>
+      ) : null}
       <List>
         {data.devPlugins.map((plugin) => (
           <li key={plugin.pluginId} className="flex items-center gap-2 px-3 py-1.5 text-sm">
@@ -789,9 +795,48 @@ function DevPlugins({ data, busy, rpc, run }: { data: HubData; busy: string | nu
                 </Button>
               </span>
             ))}
+            {plugin.stablePath === null ? null : (
+              <span title="Stop developing: go back to the published copy (keeps its settings and data)" className="inline-flex">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 shrink-0 text-muted-foreground"
+                  aria-label={`Stop developing ${plugin.name}`}
+                  disabled={busy !== null}
+                  onClick={() => void run(`devstop:${plugin.pluginId}`, () => rpc.call("hub_dev_stop", { pluginId: plugin.pluginId }))}
+                >
+                  <Glyph name="X" className="size-3.5" />
+                </Button>
+              </span>
+            )}
           </li>
         ))}
       </List>
+      <form
+        className="mt-2 flex items-center gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const dir = folder.trim();
+          if (dir === "") return;
+          setDone(null);
+          void run("devstart", async () => {
+            const started = await rpc.call("hub_dev_start", { dir });
+            setFolder("");
+            setDone(`Running ${started.pluginId} ${started.version} from ${started.dir} on this machine${started.tookOver ? " (switched from the installed copy; its settings stay)" : ""}.`);
+          });
+        }}
+      >
+        <Input
+          value={folder}
+          onChange={(event) => setFolder(event.target.value)}
+          placeholder="Plugin folder on this machine, e.g. ~/code/my-plugin"
+          aria-label="Plugin folder to develop"
+          className="h-8 min-w-0 flex-1 text-sm"
+        />
+        <Button type="submit" size="sm" className="h-8 shrink-0" disabled={busy !== null || folder.trim() === ""}>
+          {busy === "devstart" ? "…" : "Develop"}
+        </Button>
+      </form>
       {done === null ? null : <p className="mt-1 text-xs text-muted-foreground">{done}</p>}
       <Dialog open={target !== null} onOpenChange={(open) => (open ? null : setTarget(null))}>
         <DialogContent>

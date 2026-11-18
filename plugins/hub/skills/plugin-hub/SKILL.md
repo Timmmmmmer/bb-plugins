@@ -213,6 +213,8 @@ group's own folders.
 ### Publishing, betas, promoting
 
 ```sh
+bb hub dev <folder>                                      # run a plugin from your folder here (takes over a hub copy, keeps settings)
+bb hub dev stop <plugin-id>                              # back to the published copy (keeps settings)
 bb hub plugin publish <folder> [--beta] [--group <id>]   # copy a development folder in; version must be newer
 bb hub plugin promote <plugin-id> [--group <id>]         # beta/<name> becomes the stable copy
 bb hub beta                                              # betas in the subscribed groups

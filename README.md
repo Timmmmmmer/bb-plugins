@@ -75,14 +75,18 @@ Best for team plugins that live in this repository.
    bb hub plugin publish ~/code/my-plugin [--group <id>]
    ```
    Or use **Publish** under **Your local plugins** on the Plugin hub page
-   (every plugin you run from your own folder is listed there). It copies the
+   (every plugin you run from your own folder is listed there; you can also
+   start developing one there by entering its folder and clicking
+   **Develop**, which is `bb hub dev <folder>`). It copies the
    folder into the group's `plugins/<name>` and pushes. It refuses unless
    `version` in `package.json` is newer than the published copy, and lists
    what changed. Every hub in the group gets it at the next sync (within 15
    minutes) and keeps the plugin's settings and data.
 3. **Keep developing** in `~/code/my-plugin`. Your machine keeps running your
    folder (the hub leaves it alone); everyone else stays on the published copy.
-   Bump the version and publish again when it's stable.
+   Bump the version and publish again when it's stable. To go back to the
+   published copy on your machine, use the ✕ on its row or
+   `bb hub dev stop <plugin-id>` (its settings and data stay).
 
 ### Betas: try a new version with a few people first
 

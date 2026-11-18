@@ -450,6 +450,16 @@ export const rpcContract = defineRpcContract({
     input: z.object({ dir: z.string().trim().min(1).max(1000), group: z.string().trim().max(64).optional(), beta: z.boolean().optional() }),
     output: publishOutputSchema,
   },
+  /** Run a plugin from a folder on this machine (develop it); takes over an installed copy, keeping its settings. */
+  hub_dev_start: {
+    input: z.object({ dir: z.string().trim().min(1).max(1000) }),
+    output: z.object({ pluginId: z.string(), version: z.string(), dir: z.string(), tookOver: z.boolean() }),
+  },
+  /** Go back from your folder to the published copy (keeps its settings). */
+  hub_dev_stop: {
+    input: z.object({ pluginId: z.string().trim().min(1).max(128) }),
+    output: z.object({ pluginId: z.string(), version: z.string(), from: z.string() }),
+  },
   hub_promote: {
     input: z.object({ plugin: z.string().trim().min(1).max(200), group: z.string().trim().max(64).optional() }),
     output: z.object({ pluginId: z.string(), from: z.string(), to: z.string(), version: z.string().nullable(), commit: z.string().nullable(), guaranteedBy: z.string() }),
@@ -1827,6 +1837,58 @@ export default async function plugin(bb: BbPluginApi) {
     return { ...outcome, guaranteedBy: scheduleView(null).guaranteedBy };
   }
 
+  /** Run a plugin from a development folder on this machine. A copy installed from a folder (the hub's checkout) moves there, keeping its settings. */
+  async function startDeveloping(dir: string) {
+    const source = path.resolve(dir.replace(/^~(?=$|\/)/u, os.homedir()));
+    if (!(await isPluginDir(source))) throw new Error(`${source} is not a bb plugin folder (a package.json with a "bb" section) on the machine running bb.`);
+    const { pluginId } = await checkManifest(source);
+    if (pluginId === bb.pluginId) throw new Error("That is the hub itself.");
+    if (await inHubCheckout(source)) throw new Error("That folder is the hub's own checkout; use a folder of your own.");
+    const installed = (await bb.sdk.plugins.list()).plugins.find((entry) => entry.id === pluginId);
+    if (installed !== undefined && !installed.source.startsWith("path:")) {
+      throw new Error(`${pluginId} is installed from ${installed.source}, so switching to your folder needs \`bb plugin remove ${pluginId}\` first (this deletes its settings and data).`);
+    }
+    const target = `path:${source}`;
+    const result = await installWithJob({ kind: "source", source: target, selection: { kind: "root" } }, () => bb.sdk.plugins.startInstall({ source: target }));
+    bb.log.info(`developing ${pluginId} from ${source}`);
+    bb.realtime.publish(HUB_CHANGED, { developing: pluginId });
+    return { pluginId, version: result.version, dir: source, tookOver: installed !== undefined };
+  }
+
+  /** Switch a plugin from the developer's folder back to its published copy (a move: settings and data stay). */
+  async function stopDeveloping(pluginId: string) {
+    const outcome = await serialize(async () => {
+      fetchedThisRound.clear();
+      const installed = (await bb.sdk.plugins.list()).plugins.find((entry) => entry.id === pluginId);
+      if (installed === undefined || !installed.source.startsWith("path:") || (await inHubCheckout(installed.rootDir))) {
+        throw new Error(`${pluginId} isn't running from a folder of yours.`);
+      }
+      const { packagesRepo } = await readConfig();
+      let spec: PackageSpec | null = null;
+      for (const group of await subscribedGroups()) {
+        for (const candidate of (await loadPackages(group.id)).specs) {
+          if (!isLocal(candidate, packagesRepo)) continue;
+          const manifest = await readPackageJson(await syncMirror(candidate), candidate.path).catch(() => null);
+          if (manifest !== null && pluginIdForPackageName(manifest.name) === pluginId) spec = candidate;
+        }
+        if (spec !== null) break;
+      }
+      if (spec === null) throw new Error(`${pluginId} isn't published in your groups yet; publish it first, or uninstall it with \`bb plugin remove ${pluginId}\`.`);
+      const prepared = await prepareFollowed(spec);
+      const pluginDir = path.join(prepared.dir, ...spec.path.split("/"));
+      const manifest = JSON.parse(await readFile(path.join(pluginDir, "package.json"), "utf8")) as Record<string, unknown>;
+      const hasDependencies = ["dependencies", "devDependencies"].some((key) => Object.keys(z.record(z.string(), z.unknown()).catch({}).parse(manifest[key] ?? {})).length > 0);
+      if (hasDependencies) await installDependencies(pluginDir);
+      const target = `path:${pluginDir}`;
+      const result = await installWithJob({ kind: "source", source: target, selection: { kind: "root" } }, () => bb.sdk.plugins.startInstall({ source: target }));
+      await bb.storage.kv.set(`follow-built:${followKey(spec)}|${spec.path}`, prepared.head);
+      bb.log.info(`stopped developing ${pluginId}; back on ${spec.path}`);
+      return { pluginId, version: result.version, from: installed.rootDir };
+    });
+    bb.realtime.publish(HUB_CHANGED, { developing: null });
+    return outcome;
+  }
+
   /** Join or leave a plugin's beta on this machine (the "beta" setting). */
   async function setBeta(pluginId: string, joined: boolean, resetData = false) {
     const id = pluginId.trim().toLowerCase();
@@ -3105,6 +3167,14 @@ export default async function plugin(bb: BbPluginApi) {
       clientOnly(context, "hub_publish");
       return publishPlugin(dir, { group, beta });
     },
+    hub_dev_start: ({ dir }, context) => {
+      clientOnly(context, "hub_dev_start");
+      return startDeveloping(dir);
+    },
+    hub_dev_stop: ({ pluginId }, context) => {
+      clientOnly(context, "hub_dev_stop");
+      return stopDeveloping(pluginId);
+    },
     hub_promote: ({ plugin, group }, context) => {
       clientOnly(context, "hub_promote");
       return promoteBeta(plugin, group);
@@ -3340,6 +3410,22 @@ export default async function plugin(bb: BbPluginApi) {
                 `Every running hub ${published.beta ? "that joined the beta " : ""}has it by ${formatTime(published.guaranteedBy)}.`,
               ].join("\n"),
             };
+          },
+        }),
+        dev: cliCommand({
+          summary: "Run a plugin from your own folder on this machine only (develop it); an installed copy switches over, keeping its settings",
+          positionals: [{ name: "folder", description: "Your plugin folder, e.g. ~/code/my-plugin or .", required: true }],
+          async run({ positionals }, ctx) {
+            const started = await startDeveloping(path.resolve(ctx.cwd ?? process.cwd(), positionals.folder)).catch((cause) => { throw toCliError(cause); });
+            return { exitCode: 0, stdout: `Running ${started.pluginId} ${started.version} from ${started.dir} on this machine${started.tookOver ? " (switched from the installed copy; its settings stay)" : ""}. Publish it with \`bb hub plugin publish ${started.dir}\`.` };
+          },
+        }),
+        "dev stop": cliCommand({
+          summary: "Go back from your folder to the published copy of a plugin (keeps its settings and data)",
+          positionals: [{ name: "plugin", description: "The plugin id", required: true }],
+          async run({ positionals }) {
+            const stopped = await stopDeveloping(positionals.plugin.trim().toLowerCase()).catch((cause) => { throw toCliError(cause); });
+            return { exitCode: 0, stdout: `${stopped.pluginId} runs the published copy (${stopped.version}) again, instead of ${stopped.from}.` };
           },
         }),
         "plugin promote": cliCommand({
