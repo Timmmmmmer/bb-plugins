@@ -245,7 +245,7 @@ const errorMessage = (cause: unknown) => (cause instanceof Error ? cause.message
 const syncResultSchema = z.object({
   repo: z.string(),
   pluginId: z.string().nullable(),
-  outcome: z.enum(["installed", "updated", "current", "pinned", "skipped", "other-source", "updating", "removed", "failed"]),
+  outcome: z.enum(["installed", "installing", "updated", "current", "pinned", "skipped", "other-source", "updating", "removed", "failed"]),
   detail: z.string().nullable(),
   version: z.string().nullable(),
 });
@@ -802,6 +802,52 @@ export default async function plugin(bb: BbPluginApi) {
     return { owner: area, area };
   }
 
+  // -------------------------------------------------------------------------
+  // Installs run as bb install jobs: a plugin that has to be built (npm install
+  // and a build) can take minutes, and a plain install request gives up after
+  // 75 seconds. A sync waits a while for the job; a longer one keeps running
+  // in bb, and the next sync finds it (it never starts a second one).
+
+  type InstallJob = Awaited<ReturnType<BbPluginApi["sdk"]["plugins"]["startInstall"]>>;
+  type InstallTarget = InstallJob["target"];
+  const INSTALL_WAIT_MS = 60_000;
+
+  class InstallStillRunning extends Error {}
+
+  const sameTarget = (a: InstallTarget, b: InstallTarget) =>
+    a.kind === "catalog" && b.kind === "catalog"
+      ? a.entryId === b.entryId && a.marketplace === b.marketplace
+      : a.kind === "source" && b.kind === "source"
+        ? a.source === b.source && JSON.stringify(a.selection) === JSON.stringify(b.selection)
+        : false;
+  const jobRunning = (job: InstallJob) => job.state === "queued" || job.state === "running" || job.state === "cancelling";
+
+  /** Start an install job (or join one already running for the same target) and wait for it. */
+  async function installWithJob(target: InstallTarget | null, start: () => Promise<InstallJob>): Promise<{ id: string; version: string }> {
+    const running = target === null ? undefined : (await bb.sdk.plugins.installJobs.list().catch(() => [])).find((job) => jobRunning(job) && sameTarget(job.target, target));
+    let job = running ?? (await start());
+    const deadline = Date.now() + INSTALL_WAIT_MS;
+    while (jobRunning(job)) {
+      if (Date.now() > deadline) throw new InstallStillRunning(`bb is still installing ${job.displayName} (it has to be built); it finishes in the background.`);
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      job = await bb.sdk.plugins.installJobs.get({ jobId: job.id });
+    }
+    if (job.state === "succeeded") return job.plugin;
+    if (job.state === "failed") throw new Error(job.error);
+    throw new Error(`The install of ${job.displayName} was cancelled.`);
+  }
+
+  /** Install from a git source and subfolder as a job. */
+  const installSource = (source: string, subdirectory: string | undefined) =>
+    installWithJob(
+      { kind: "source", source, selection: subdirectory ? { kind: "subdirectory", path: subdirectory } : { kind: "root" } },
+      () => bb.sdk.plugins.startInstall({ source, ...(subdirectory ? { subdirectory } : {}) }),
+    );
+
+  /** A sync result for an install that is still running in bb. */
+  const stillInstalling = (cause: unknown, repo: string, pluginId: string | null): SyncResult | null =>
+    cause instanceof InstallStillRunning ? { repo, pluginId, outcome: "installing", detail: cause.message, version: null } : null;
+
   async function installOrUpdate(spec: PackageSpec, label: string): Promise<SyncResult> {
     const dir = await syncMirror(spec);
     const pluginId = pluginIdForPackageName((await readPackageJson(dir, spec.path)).name);
@@ -811,7 +857,14 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const installed = (await bb.sdk.plugins.list()).plugins.find((entry) => entry.id === pluginId);
     if (installed === undefined) {
-      const result = await bb.sdk.plugins.install({ source: sourceFor(spec), ...(spec.path ? { subdirectory: spec.path } : {}) });
+      let result: { id: string; version: string };
+      try {
+        result = await installSource(sourceFor(spec), spec.path || undefined);
+      } catch (cause) {
+        const pending = stillInstalling(cause, label, pluginId);
+        if (pending !== null) return pending;
+        throw cause;
+      }
       bb.log.info(`installed ${result.id}@${result.version} from ${label}`);
       return { repo: label, pluginId, outcome: "installed", detail: null, version: result.version };
     }
@@ -834,7 +887,14 @@ export default async function plugin(bb: BbPluginApi) {
       const stillThere = await git(["cat-file", "-e", `HEAD:${inFolder(from, "package.json")}`], dir).then(() => true, () => false);
       if (!stillThere) {
         await bb.sdk.plugins.remove({ pluginId });
-        const result = await bb.sdk.plugins.install({ source: sourceFor(spec), ...(spec.path ? { subdirectory: spec.path } : {}) });
+        let result: { id: string; version: string };
+        try {
+          result = await installSource(sourceFor(spec), spec.path || undefined);
+        } catch (cause) {
+          const pending = stillInstalling(cause, label, pluginId);
+          if (pending !== null) return pending;
+          throw cause;
+        }
         bb.log.info(`reinstalled ${pluginId} from ${spec.path}: it moved from ${from}`);
         return {
           repo: label,
@@ -971,14 +1031,25 @@ export default async function plugin(bb: BbPluginApi) {
       if (!plan.compatible) {
         return { repo: label, pluginId, outcome: "failed", detail: plan.incompatibleReason ?? "Not compatible with this bb.", version: null };
       }
-      const result = await bb.sdk.plugins.catalog.install({
+      const args = {
         entryId: entry.id,
         ...(plan.kind === "marketplace"
           ? { marketplace: plan.marketplace, confirmedSource: plan.resolvedSource }
           : entry.marketplace
             ? { marketplace: entry.marketplace }
             : {}),
-      });
+      };
+      let result: { id: string; version: string };
+      try {
+        result = await installWithJob(
+          plan.kind === "marketplace" ? { kind: "catalog", entryId: entry.id, marketplace: plan.marketplace } : null,
+          () => bb.sdk.plugins.catalog.startInstall(args),
+        );
+      } catch (cause) {
+        const pending = stillInstalling(cause, label, pluginId);
+        if (pending !== null) return pending;
+        throw cause;
+      }
       bb.log.info(`installed ${result.id}@${result.version} from ${label}`);
       return { repo: label, pluginId, outcome: "installed", detail: null, version: result.version };
     }
