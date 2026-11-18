@@ -7,13 +7,7 @@
   "exclude": [],
   "remote": [],
   "uninstall": [],
-  "marketplace": [
-    {
-      "id": "communications-hub",
-      "marketplace": "ensembleworks",
-      "source": "git:https://github.com/lean-software-production/ensembleworks.git@HEAD"
-    }
-  ],
+  "marketplace": [],
   "follow": [
     {
       "repo": "lean-software-production/ensembleworks"
