@@ -423,7 +423,13 @@ export const rpcContract = defineRpcContract({
       syncing: z.object({ trigger: z.string(), startedAt: z.string() }).nullable(),
       /** The hub is updating itself: applying (the old hub started it) or finishing (the new hub's first sync). */
       updating: z.object({ phase: z.enum(["applying", "finishing"]), to: z.string().nullable() }).nullable(),
+      /** The Publish buttons live in the thread side panel's Publish tab (setting publishInSidePanel). */
+      publishInSidePanel: z.boolean(),
     }),
+  },
+  hub_publish_in_side_panel: {
+    input: z.object({ on: z.boolean() }),
+    output: z.object({ on: z.boolean() }),
   },
   hub_install: {
     input: z.object({ path: z.string().min(1).max(200) }),
@@ -585,6 +591,12 @@ export default async function plugin(bb: BbPluginApi) {
       description:
         "Comma-separated ids of the plugins this machine runs the beta copy of (\"*\" for every plugin with one). Manage with `bb hub beta join/leave <id>` or the β toggles on the Plugin hub page.",
       default: "",
+    },
+    publishInSidePanel: {
+      type: "boolean",
+      label: "Publish in the side panel",
+      description: "Show the Publish buttons for the plugins you develop in a Publish tab in the thread side panel, instead of on the Plugin hub page.",
+      default: false,
     },
     hubPath: {
       type: "string",
@@ -3136,6 +3148,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (next[key] !== prev[key]) bb.log.warn(`setting ${key} changed from "${String(prev[key])}" to "${String(next[key])}"`);
     }
     if (next.mirrorsDir !== prev.mirrorsDir) activeMirrorRoot = null;
+    // Where the Publish buttons show doesn't change what's installed.
+    const changed = (Object.keys(next) as (keyof typeof next)[]).filter((key) => next[key] !== prev[key]);
+    if (changed.length > 0 && changed.every((key) => key === "publishInSidePanel")) return;
     syncInBackground("settings changed");
   });
 
@@ -3193,7 +3208,13 @@ export default async function plugin(bb: BbPluginApi) {
     },
     hub_status: (_input, context) => {
       clientOnly(context, "hub_status");
-      return updatingView().then((updating) => ({ syncing, updating }));
+      return Promise.all([updatingView(), settings.get()]).then(([updating, values]) => ({ syncing, updating, publishInSidePanel: values.publishInSidePanel }));
+    },
+    hub_publish_in_side_panel: async ({ on }, context) => {
+      clientOnly(context, "hub_publish_in_side_panel");
+      await settings.experimental_set({ publishInSidePanel: on });
+      bb.realtime.publish(HUB_CHANGED, { publishInSidePanel: on });
+      return { on };
     },
     hub_move: ({ kind, ref, path: folder, from, to }, context) => {
       clientOnly(context, "hub_move");

@@ -751,10 +751,50 @@ function Betas({ data, busy, rpc, run }: { data: HubData; busy: string | null; r
 
 type PublishTarget = { plugin: DevPlugin; beta: boolean };
 
-function DevPlugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
+/** The "Publish in the side panel" option, as a checkbox. */
+function SidePanelOption({ on, busy, rpc, run }: { on: boolean; busy: string | null; rpc: Rpc; run: Run }) {
+  return (
+    <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+      <input
+        type="checkbox"
+        checked={on}
+        disabled={busy !== null}
+        onChange={(event) => void run("sidepanel", () => rpc.call("hub_publish_in_side_panel", { on: event.target.checked }))}
+      />
+      Publish in the side panel (a Publish tab next to a thread's files and diffs)
+    </label>
+  );
+}
+
+function DevPlugins({
+  data,
+  busy,
+  rpc,
+  run,
+  sidePanel,
+  inSidePanel = false,
+}: {
+  data: HubData;
+  busy: string | null;
+  rpc: Rpc;
+  run: Run;
+  /** Whether the option to publish from the side panel is on. */
+  sidePanel: boolean;
+  /** Rendered in the side panel's Publish tab (rather than on the Plugin hub page). */
+  inSidePanel?: boolean;
+}) {
   const [target, setTarget] = useState<PublishTarget | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [folder, setFolder] = useState("");
+  if (sidePanel && !inSidePanel) {
+    return (
+      <>
+        <Title>Your local plugins</Title>
+        <Empty>Publishing is in the thread side panel: open a thread and pick its Publish tab.</Empty>
+        <SidePanelOption on={sidePanel} busy={busy} rpc={rpc} run={run} />
+      </>
+    );
+  }
   const blocker = (plugin: DevPlugin, beta: boolean): string | null => {
     const published = beta ? plugin.betaVersion : plugin.stableVersion;
     if (published !== null && compareVersions(plugin.version, published) <= 0) return `Bump the version: ${plugin.version ?? "?"} isn't newer than the published ${published}.`;
@@ -764,7 +804,7 @@ function DevPlugins({ data, busy, rpc, run }: { data: HubData; busy: string | nu
   const published = target === null ? null : target.beta ? target.plugin.betaVersion : target.plugin.stableVersion;
   return (
     <>
-      <Title>Your local plugins</Title>
+      {inSidePanel ? null : <Title>Your local plugins</Title>}
       {data.devPlugins.length === 0 ? (
         <Empty>
           Plugins you develop in a folder on this machine show up here, with buttons to publish them. Enter a plugin folder below to run it
@@ -843,6 +883,7 @@ function DevPlugins({ data, busy, rpc, run }: { data: HubData; busy: string | nu
           {busy === "devstart" ? "…" : "Develop"}
         </Button>
       </form>
+      <SidePanelOption on={sidePanel} busy={busy} rpc={rpc} run={run} />
       {done === null ? null : <p className="mt-1 text-xs text-muted-foreground">{done}</p>}
       <Dialog open={target !== null} onOpenChange={(open) => (open ? null : setTarget(null))}>
         <DialogContent>
@@ -1111,11 +1152,13 @@ function HubPage() {
   const [syncing, setSyncing] = useState<Syncing>(null);
   // The hub updating itself (it reloads; calls fail for a moment while it restarts).
   const [updating, setUpdating] = useState(false);
+  const [sidePanel, setSidePanel] = useState(false);
   const refreshStatus = useCallback(() => {
     rpc.call("hub_status", null).then(
       (status) => {
         setSyncing(status.syncing);
         setUpdating(status.updating !== null);
+        setSidePanel(status.publishInSidePanel);
       },
       () => undefined,
     );
@@ -1205,7 +1248,7 @@ function HubPage() {
               <Plugins data={data} busy={busy} rpc={rpc} run={run} />
               <Betas data={data} busy={busy} rpc={rpc} run={run} />
               <MarketplacePlugins data={data} busy={busy} rpc={rpc} run={run} />
-              <DevPlugins data={data} busy={busy} rpc={rpc} run={run} />
+              <DevPlugins data={data} busy={busy} rpc={rpc} run={run} sidePanel={sidePanel} />
               <SyncLine data={data} busy={busy} rpc={rpc} run={run} syncing={syncing} />
               <AddPlugin busy={busy} rpc={rpc} run={run} group={data.group} />
               <AddFromMarketplace data={data} busy={busy} rpc={rpc} run={run} />
@@ -1217,6 +1260,99 @@ function HubPage() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// The Publish tab in the thread side panel (option "Publish in the side panel")
+
+function useSidePanelOption(): boolean {
+  const rpc = useRpc<typeof rpcContract>();
+  const [on, setOn] = useState(false);
+  const load = useCallback(() => {
+    rpc.call("hub_status", null).then((status) => setOn(status.publishInSidePanel), () => undefined);
+  }, [rpc]);
+  useEffect(load, [load]);
+  useRealtime("hub-changed", load);
+  return on;
+}
+
+function PublishTab() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [data, setData] = useState<HubData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [group, setGroup] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem(GROUP_STORAGE_KEY) ?? "home";
+    } catch {
+      return "home";
+    }
+  });
+  const sidePanel = useSidePanelOption();
+  const refetch = useCallback(() => {
+    rpc.call("hub_list", { group }).then(
+      (result) => {
+        setData(result);
+        setError(null);
+      },
+      (cause: unknown) => (group !== "home" && String(cause).includes("no group") ? setGroup("home") : setError(String(cause))),
+    );
+  }, [rpc, group]);
+  useEffect(refetch, [refetch]);
+  useRealtime("hub-changed", refetch);
+  const run: Run = async (key, action) => {
+    setBusy(key);
+    setError(null);
+    try {
+      await action();
+      refetch();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <div className="h-full min-h-0 overflow-y-auto px-3 pb-4 pt-2 text-sm">
+      {error === null ? null : (
+        <p role="alert" className="mb-2 text-sm text-destructive">
+          {error}
+        </p>
+      )}
+      {data === null ? (
+        <Spinner>Loading…</Spinner>
+      ) : (
+        <>
+          <label className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
+            Publish to
+            <select
+              value={data.group.id}
+              onChange={(event) => setGroup(event.target.value)}
+              aria-label="Group to publish to"
+              className="h-7 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm text-foreground"
+            >
+              {data.groups.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <DevPlugins data={data} busy={busy} rpc={rpc} run={run} sidePanel={sidePanel} inSidePanel />
+        </>
+      )}
+    </div>
+  );
+}
+
 export default definePluginApp((app) => {
+  app.slots.experimental_tab({
+    id: "publish",
+    title: "Publish",
+    icon: "Upload",
+    tooltip: "Publish the plugins you develop (Plugin hub)",
+    context: { kind: "thread" },
+    availability: "fixed",
+    useVisible: () => useSidePanelOption(),
+    component: PublishTab,
+  });
   app.slots.navPanel({ id: "plugin-hub", title: "Plugin hub", icon: "Package", path: "plugin-hub", component: HubPage });
 });
