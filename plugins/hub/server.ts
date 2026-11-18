@@ -341,6 +341,12 @@ export const rpcContract = defineRpcContract({
       hubVersion: z.string().nullable(),
     }),
   },
+  /** Answers at once, even during a sync (hub_list waits for a running sync). */
+  hub_status: {
+    input: z.null(),
+    /** The sync running right now on this machine (what started it, and when), or null. */
+    output: z.object({ syncing: z.object({ trigger: z.string(), startedAt: z.string() }).nullable() }),
+  },
   hub_install: {
     input: z.object({ path: z.string().min(1).max(200) }),
     output: syncResultSchema,
@@ -1537,6 +1543,17 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function runSync(trigger: string): Promise<SyncReport> {
+    syncing = { trigger, startedAt: new Date().toISOString() };
+    bb.realtime.publish(HUB_CHANGED, { syncing: trigger });
+    try {
+      return await runSyncSteps(trigger);
+    } finally {
+      syncing = null;
+      bb.realtime.publish(HUB_CHANGED, { syncing: null });
+    }
+  }
+
+  async function runSyncSteps(trigger: string): Promise<SyncReport> {
     const startedAt = Date.now();
     fetchedThisRound.clear();
     const results: SyncResult[] = [];
@@ -1684,6 +1701,7 @@ export default async function plugin(bb: BbPluginApi) {
     return report;
   }
 
+  let syncing: { trigger: string; startedAt: string } | null = null;
   let chain: Promise<unknown> = Promise.resolve();
   function serialize<T>(task: () => Promise<T>): Promise<T> {
     const next = chain.then(task);
@@ -2344,6 +2362,10 @@ export default async function plugin(bb: BbPluginApi) {
       const lastSync = (await bb.storage.kv.get<SyncReport>(LAST_SYNC_KEY)) ?? null;
       const self = (await bb.sdk.plugins.list()).plugins.find((plugin) => plugin.id === bb.pluginId);
       return { ...(await listHub(input?.group)), lastSync, schedule: scheduleView(lastSync), hubVersion: self?.version ?? null };
+    },
+    hub_status: (_input, context) => {
+      clientOnly(context, "hub_status");
+      return { syncing };
     },
     hub_move: ({ kind, ref, path: folder, from, to }, context) => {
       clientOnly(context, "hub_move");

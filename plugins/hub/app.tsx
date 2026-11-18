@@ -47,6 +47,18 @@ type MarketplaceView = {
   } | null;
 };
 
+type Syncing = { trigger: string; startedAt: string } | null;
+
+/** A small spinning indicator with a label. */
+function Spinner({ children }: { children: ReactNode }) {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground" role="status">
+      <Glyph name="RefreshCw" className="size-3.5 animate-spin" />
+      {children}
+    </span>
+  );
+}
+
 const PROBLEM: SyncResult["outcome"][] = ["failed", "other-source"];
 const isSubscribed = (data: HubData) => data.groups.find((group) => group.id === data.group.id)?.subscribed ?? true;
 const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -191,6 +203,9 @@ function GroupSelector({
   busy,
   rpc,
   run,
+  loading,
+  syncing,
+  onSubscribed,
 }: {
   data: HubData;
   selected: string;
@@ -198,8 +213,12 @@ function GroupSelector({
   busy: string | null;
   rpc: Rpc;
   run: Run;
+  loading: boolean;
+  syncing: Syncing;
+  onSubscribed: (result: { group: string; subscribed: boolean }) => void;
 }) {
   const current = data.groups.find((group) => group.id === selected) ?? data.groups[0];
+  const subscribing = current !== undefined && busy === `subscribe:${current.id}`;
   const [edit, setEdit] = useState<GroupEdit | null>(null);
   const [name, setName] = useState("");
   const open = (next: GroupEdit) => {
@@ -248,25 +267,38 @@ function GroupSelector({
             size="sm"
             variant={current.subscribed ? "ghost" : "default"}
             className="h-8 shrink-0"
-            disabled={busy !== null}
+            disabled={busy !== null || loading}
             onClick={() =>
-              void run(`subscribe:${current.id}`, () => rpc.call("hub_group_subscribe", { group: current.id, subscribed: !current.subscribed }))
+              void run(`subscribe:${current.id}`, async () =>
+                onSubscribed(await rpc.call("hub_group_subscribe", { group: current.id, subscribed: !current.subscribed })),
+              )
             }
           >
-            {busy === `subscribe:${current.id}` ? "…" : current.subscribed ? "Unsubscribe" : "Subscribe"}
+            {subscribing ? <Glyph name="RefreshCw" className="size-3.5 animate-spin" /> : null}
+            {subscribing ? (current.subscribed ? "Unsubscribing…" : "Subscribing…") : current.subscribed ? "Unsubscribe" : "Subscribe"}
           </Button>
         )}
         <div className="flex shrink-0 items-center">
           {current === undefined ? null : (
-            <IconButton label="Rename group" glyph="Pencil" disabled={busy !== null} onClick={() => open({ mode: "rename", group: current })} />
+            <IconButton label="Rename group" glyph="Pencil" disabled={busy !== null || loading} onClick={() => open({ mode: "rename", group: current })} />
           )}
           {current === undefined || current.home ? null : (
-            <IconButton label="Remove group" glyph="Trash2" disabled={busy !== null} onClick={() => open({ mode: "remove", group: current })} />
+            <IconButton label="Remove group" glyph="Trash2" disabled={busy !== null || loading} onClick={() => open({ mode: "remove", group: current })} />
           )}
           <IconButton label="Add a group" glyph="Plus" disabled={busy !== null} onClick={() => open({ mode: "add" })} />
         </div>
       </div>
-      {current !== undefined && !current.subscribed ? (
+      {loading ? (
+        <p className="mt-1">
+          <Spinner>
+            {syncing !== null ? `Loading ${current?.name ?? "the group"} once the sync running now finishes…` : `Loading ${current?.name ?? "the group"}…`}
+          </Spinner>
+        </p>
+      ) : syncing !== null && !subscribing ? (
+        <p className="mt-1">
+          <Spinner>Syncing: installing and updating this machine's plugins…</Spinner>
+        </p>
+      ) : current !== undefined && !current.subscribed ? (
         <p className="mt-1 text-xs text-muted-foreground">
           This machine isn't subscribed to {current.name}, so it doesn't install these plugins. Subscribe to get them.
         </p>
@@ -584,7 +616,7 @@ function MarketplacePlugins({ data, busy, rpc, run }: { data: HubData; busy: str
 // ---------------------------------------------------------------------------
 // 3. Sync time
 
-function SyncLine({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
+function SyncLine({ data, busy, rpc, run, syncing }: { data: HubData; busy: string | null; rpc: Rpc; run: Run; syncing: Syncing }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 15_000);
@@ -598,11 +630,12 @@ function SyncLine({ data, busy, rpc, run }: { data: HubData; busy: string | null
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
       <Glyph name="Clock" className="size-3.5 shrink-0" />
       <span className="min-w-0 flex-1">
+        {syncing !== null ? <strong className="text-foreground">Syncing now… </strong> : null}
         Next sync <strong className="text-foreground">{time(by)}</strong> (every {data.schedule.intervalMinutes} min, same time for everyone)
         {self !== null && PROBLEM.includes(self.outcome) ? <span className="text-destructive"> · hub: {self.outcome}</span> : null}
       </span>
-      <Button variant="ghost" size="sm" className="h-7 px-2" disabled={busy !== null} onClick={() => void run("sync", () => rpc.call("hub_sync"))}>
-        <Glyph name="RefreshCw" className={cn("size-3.5", busy === "sync" && "animate-spin")} />
+      <Button variant="ghost" size="sm" className="h-7 px-2" disabled={busy !== null || syncing !== null} onClick={() => void run("sync", () => rpc.call("hub_sync"))}>
+        <Glyph name="RefreshCw" className={cn("size-3.5", (busy === "sync" || syncing !== null) && "animate-spin")} />
         Sync now
       </Button>
     </div>
@@ -834,22 +867,41 @@ function HubPage() {
   };
 
   const report = useCallback((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)), []);
+  // A running sync on this machine (hub_status answers at once; hub_list waits for the sync).
+  const [syncing, setSyncing] = useState<Syncing>(null);
+  const refreshStatus = useCallback(() => {
+    rpc.call("hub_status", null).then((status) => setSyncing(status.syncing), () => undefined);
+  }, [rpc]);
+  // Only the newest hub_list answer counts (switching groups quickly).
+  const latest = useRef(0);
   const refetch = useCallback(() => {
+    refreshStatus();
+    const request = ++latest.current;
     rpc.call("hub_list", { group }).then(
       (result) => {
+        if (request !== latest.current) return;
         setData(result);
         setError(null);
       },
       (cause: unknown) => {
+        if (request !== latest.current) return;
         // A remembered group that no longer exists falls back to home.
         if (group !== "home" && String(cause).includes("no group")) selectGroup("home");
         else report(cause);
       },
     );
-  }, [rpc, report, group]);
+  }, [rpc, report, group, refreshStatus]);
   useEffect(() => {
     refetch();
   }, [refetch]);
+  const loading = data !== null && data.group.id !== group;
+  // Show a (un)subscribe at once; the group list catches up after the sync it starts.
+  const onSubscribed = ({ group: id, subscribed }: { group: string; subscribed: boolean }) => {
+    setData((previous) =>
+      previous === null ? previous : { ...previous, groups: previous.groups.map((entry) => (entry.id === id ? { ...entry, subscribed } : entry)) },
+    );
+    refreshStatus();
+  };
   useRealtime("hub-changed", refetch);
 
   const run: Run = async (key, action) => {
@@ -877,12 +929,14 @@ function HubPage() {
           <p className="mt-4 text-sm text-muted-foreground">Loading…</p>
         ) : (
           <>
-            <GroupSelector data={data} selected={data.group.id} onSelect={selectGroup} busy={busy} rpc={rpc} run={run} />
-            <Plugins data={data} busy={busy} rpc={rpc} run={run} />
-            <MarketplacePlugins data={data} busy={busy} rpc={rpc} run={run} />
-            <SyncLine data={data} busy={busy} rpc={rpc} run={run} />
-            <AddPlugin busy={busy} rpc={rpc} run={run} group={data.group} />
-            <AddFromMarketplace data={data} busy={busy} rpc={rpc} run={run} />
+            <GroupSelector data={data} selected={group} onSelect={selectGroup} busy={busy} rpc={rpc} run={run} loading={loading} syncing={syncing} onSubscribed={onSubscribed} />
+            <div className={cn("transition-opacity", loading && "pointer-events-none opacity-40")} aria-busy={loading}>
+              <Plugins data={data} busy={busy} rpc={rpc} run={run} />
+              <MarketplacePlugins data={data} busy={busy} rpc={rpc} run={run} />
+              <SyncLine data={data} busy={busy} rpc={rpc} run={run} syncing={syncing} />
+              <AddPlugin busy={busy} rpc={rpc} run={run} group={data.group} />
+              <AddFromMarketplace data={data} busy={busy} rpc={rpc} run={run} />
+            </div>
           </>
         )}
       </div>
