@@ -8,9 +8,5 @@
   "remote": [],
   "uninstall": [],
   "marketplace": [],
-  "local": [
-    {
-      "path": "plugins/hello"
-    }
-  ]
+  "local": []
 }

@@ -17,9 +17,7 @@
   "include": [
     "plugins/*"
   ],
-  "exclude": [
-    "plugins/hello"
-  ],
+  "exclude": [],
   "remote": [],
   "uninstall": [],
   "marketplace": [
