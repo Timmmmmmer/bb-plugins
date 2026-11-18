@@ -153,3 +153,32 @@ by hand. On each sync the hub adds it with
 when it's missing, and refreshes it when the repository's commit changed
 (setting `registerMarketplace`, on by default). It then appears in Settings →
 Plugin marketplaces and in `bb plugin search`.
+
+## Groups
+
+The repository root is the **home** group (always installed). The root
+`packages.json` lists other groups:
+`"groups": [{ "id": "lean-software-developers", "name": "…", "path": "groups/lean-software-developers" }, …]`.
+Each group folder has its own `packages.json` (include/exclude relative to the
+folder, `remote`, `marketplace`, `uninstall`), `plugins/<name>/`, and
+generated `marketplace.json` (named `bb-plugins-<id>`).
+
+```sh
+bb hub group [--json]               # groups and this machine's subscriptions
+bb hub group subscribe <id>         # install and update that group's plugins here
+bb hub group unsubscribe <id>       # stop (its plugins stay installed); its marketplace leaves Settings
+bb hub packages [--group <id>]      # what each subscribed group lists
+```
+
+Every command that changes the repository takes `--group <id>` (default home):
+`plugin add/remove/delete`, `marketplace add/remove`, `list`, `marketplace`.
+Subscriptions are the `groups` setting (comma-separated ids).
+
+Clashes: when one plugin id is listed in several subscribed groups (or twice
+in one), the candidate with the highest `version` in its package.json wins;
+on a tie, the home group, then group order. The others report `skipped` with
+the winner. A plugin already installed from another folder of the same
+repository is reported `other-source` with a `bb hub adopt <folder>` hint and is
+never switched automatically, because switching reinstalls it and resets its
+data. A group's `uninstall` list only removes plugins installed from that
+group's own folders.

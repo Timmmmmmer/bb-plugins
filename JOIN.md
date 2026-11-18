@@ -29,6 +29,27 @@ say `hub (self) current`. The **Plugin hub** page in the bb sidebar shows the
 same information, plus every plugin folder in the repository with an Install
 button.
 
+## Groups
+
+Everyone gets the **Home** group. To also get a team's plugins, subscribe to
+its group:
+
+```sh
+bb hub group                                         # list groups and your subscriptions
+bb hub group subscribe lean-software-developers
+bb hub group subscribe lean-software-student
+bb hub group unsubscribe lean-software-student       # its plugins stay installed, but stop updating
+```
+
+The Plugin hub page has the same choice in the selector at the top. Whatever
+you add or delete on the page goes to the group selected there. On the CLI,
+use `--group <id>`, e.g. `bb hub plugin add ~/code/my-plugin --group lean-software-student`.
+
+If the same plugin is in more than one of your groups, the newest version wins.
+If you already have it from one group and a newer copy appears in another, the
+hub tells you instead of switching (switching reinstalls the plugin, which
+resets its data). `bb hub adopt <folder>` switches when you're ready.
+
 ## Team marketplace
 
 The hub also adds this repository's [`marketplace.json`](marketplace.json) to

@@ -1,5 +1,18 @@
 {
-  "$comment": "What every hub installs. Local plugins: every folder under the include patterns (plugins/*) that holds a bb plugin, except exclude. Remote plugins: other PUBLIC repositories, installed straight from there ({ \"repo\": \"owner/name or https URL\", \"path\"?: \"folder in that repo\", \"ref\"?: \"branch/tag/semver:...\" }); private repositories are not supported. Uninstall: plugin ids every hub uninstalls (with their data); filled when a local plugin is deleted, emptied when it is added again. Marketplace plugins: from bb's marketplaces ({ \"id\", \"marketplace\"?, \"source\"? }). Manage them with bb hub plugin add/remove and bb hub marketplace add/remove. syncIntervalMinutes (5-1440): the shared sync interval; every hub syncs at the same UTC-aligned times.",
+  "$comment": "The home group (the repository root). What every hub installs from this group. Local plugins: every folder under the include patterns (plugins/*) that holds a bb plugin, except exclude. Remote plugins: other PUBLIC repositories, installed straight from there ({ \"repo\": \"owner/name or https URL\", \"path\"?: \"folder in that repo\", \"ref\"?: \"branch/tag/semver:...\" }); private repositories are not supported. Uninstall: plugin ids every hub uninstalls (with their data); filled when a local plugin is deleted, emptied when it is added again. Marketplace plugins: from bb's marketplaces ({ \"id\", \"marketplace\"?, \"source\"? }). Manage them with bb hub plugin add/remove and bb hub marketplace add/remove. syncIntervalMinutes (5-1440): the shared sync interval; every hub syncs at the same UTC-aligned times. groups: the other groups in this repository, each in its own folder with the same files; machines subscribe to them with bb hub group subscribe <id>. When the same plugin id is in several subscribed groups, the newest version wins.",
+  "name": "Home",
+  "groups": [
+    {
+      "id": "lean-software-developers",
+      "name": "Lean Software Developers",
+      "path": "groups/lean-software-developers"
+    },
+    {
+      "id": "lean-software-student",
+      "name": "Lean Software Student",
+      "path": "groups/lean-software-student"
+    }
+  ],
   "syncIntervalMinutes": 15,
   "include": [
     "plugins/*"

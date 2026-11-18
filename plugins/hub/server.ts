@@ -68,7 +68,18 @@ const packageEntrySchema = z.object({
   /** Branch, tag, or "semver:[prefix:]range"; defaults to the default branch. */
   ref: z.string().trim().min(1).optional(),
 });
+const groupEntrySchema = z.object({
+  /** Lowercase id, e.g. "lean-software-developers". */
+  id: z.string().trim().min(1),
+  name: z.string().trim().min(1).optional(),
+  /** The group's folder in the repository, e.g. "groups/lean-software-developers". */
+  path: z.string().trim().min(1),
+});
 const packagesFileSchema = z.object({
+  /** The group's display name. */
+  name: z.string().trim().min(1).optional(),
+  /** Only in the repository root (the home group): the other groups members can subscribe to. */
+  groups: z.array(groupEntrySchema).max(50).optional(),
   syncIntervalMinutes: z.number().int().min(5).max(1440).optional(),
   /** Folder patterns whose every subfolder is a package, e.g. "plugins/*". */
   include: z.array(z.string().trim().min(1)).max(20).optional(),
@@ -127,6 +138,39 @@ interface PackageSpec extends RepoRef {
   /** The plugin's folder in the repository; "" is the repository root. */
   path: string;
   ref: string | null;
+  /** The group that lists it (filled in by loadPackages). */
+  group?: string;
+}
+
+/** A group of plugins: the repository root (home) or a folder under groups/. */
+interface Group {
+  id: string;
+  name: string;
+  /** "" for the home group (the repository root). */
+  path: string;
+}
+const HOME_GROUP = "home";
+const GROUP_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+/** A file inside a group's folder. */
+const inGroup = (group: Group, file: string) => (group.path === "" ? file : `${group.path}/${file}`);
+
+/** Compare two versions like "1.2.3" or "1.2.3-beta.1"; a missing version is oldest. */
+function compareVersions(a: string | null | undefined, b: string | null | undefined): number {
+  const parse = (value: string | null | undefined) => {
+    const match = value?.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/u);
+    return match ? { parts: [Number(match[1]), Number(match[2]), Number(match[3])], pre: match[4] ?? null } : null;
+  };
+  const left = parse(a);
+  const right = parse(b);
+  if (left === null || right === null) return left === null ? (right === null ? 0 : -1) : 1;
+  for (let i = 0; i < 3; i += 1) {
+    const diff = (left.parts[i] ?? 0) - (right.parts[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  if (left.pre === right.pre) return 0;
+  if (left.pre === null) return 1; // a release is newer than its prerelease
+  if (right.pre === null) return -1;
+  return left.pre.localeCompare(right.pre, undefined, { numeric: true });
 }
 
 /**
@@ -255,9 +299,11 @@ export type PackageView = z.infer<typeof packageViewSchema>;
 
 export const rpcContract = defineRpcContract({
   hub_list: {
-    input: z.null(),
+    input: z.object({ group: z.string().trim().max(64).optional() }).nullable(),
     output: z.object({
       repo: z.string(),
+      group: z.object({ id: z.string(), name: z.string(), path: z.string() }),
+      groups: z.array(z.object({ id: z.string(), name: z.string(), path: z.string(), subscribed: z.boolean(), home: z.boolean() })),
       folders: z.array(folderSchema),
       packages: z.array(packageViewSchema),
       marketplace: z.array(z.object({
@@ -308,8 +354,12 @@ export const rpcContract = defineRpcContract({
       compatible: z.boolean(),
     })),
   },
+  hub_group_subscribe: {
+    input: z.object({ group: z.string().trim().min(1).max(64), subscribed: z.boolean() }),
+    output: z.object({ group: z.string(), name: z.string(), subscribed: z.boolean(), guaranteedBy: z.string() }),
+  },
   hub_marketplace_add: {
-    input: z.object({ entry: z.string().trim().min(1).max(200) }),
+    input: z.object({ entry: z.string().trim().min(1).max(200), group: z.string().trim().max(64).optional() }),
     output: z.object({
       entry: z.string(),
       pluginId: z.string(),
@@ -322,7 +372,7 @@ export const rpcContract = defineRpcContract({
     }),
   },
   hub_marketplace_remove: {
-    input: z.object({ entry: z.string().trim().min(1).max(200) }),
+    input: z.object({ entry: z.string().trim().min(1).max(200), group: z.string().trim().max(64).optional() }),
     output: z.object({ removed: z.array(z.string()), commit: z.string().nullable(), guaranteedBy: z.string() }),
   },
   hub_add_plugin: {
@@ -334,6 +384,7 @@ export const rpcContract = defineRpcContract({
         name: z.string().trim().max(64).optional(),
         subdir: z.string().trim().max(200).optional(),
         force: z.boolean().optional(),
+        group: z.string().trim().max(64).optional(),
       })
       .refine((input) => [input.source, input.files, input.archive].filter((value) => value !== undefined).length === 1, {
         message: "give exactly one of source, files, or archive",
@@ -355,11 +406,11 @@ export const rpcContract = defineRpcContract({
     }),
   },
   hub_local_delete: {
-    input: z.object({ path: z.string().trim().min(1).max(200) }),
+    input: z.object({ path: z.string().trim().min(1).max(200), group: z.string().trim().max(64).optional() }),
     output: z.object({ folder: z.string(), pluginId: z.string(), commit: z.string().nullable(), removedHere: z.boolean(), guaranteedBy: z.string() }),
   },
   hub_remote_remove: {
-    input: z.object({ repo: z.string().trim().min(1).max(500), path: z.string().trim().max(200).optional() }),
+    input: z.object({ repo: z.string().trim().min(1).max(500), path: z.string().trim().max(200).optional(), group: z.string().trim().max(64).optional() }),
     output: z.object({ removed: z.array(z.string()), commit: z.string().nullable(), guaranteedBy: z.string() }),
   },
 });
@@ -383,6 +434,13 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Packages repository",
       description: "Public owner/name of the repository with packages.json and the plugins/ folders.",
       default: "Timmmmmmer/bb-plugins",
+    },
+    groups: {
+      type: "string",
+      label: "Subscribed groups",
+      description:
+        "Comma-separated ids of the groups this machine installs, in addition to the home group (always on). Manage with `bb hub group subscribe/unsubscribe <id>` or the selector on the Plugin hub page.",
+      default: "",
     },
     hubPath: {
       type: "string",
@@ -418,7 +476,11 @@ export default async function plugin(bb: BbPluginApi) {
     const values = await settings.get();
     const hubPath = values.hubPath.trim();
     if (!PATH_PATTERN.test(hubPath)) throw new Error(`Invalid hubPath "${hubPath}".`);
-    return { packagesRepo: parseRepo(values.packagesRepo), hubPath, selfUpdate: values.selfUpdate };
+    const subscribed = values.groups
+      .split(/[\s,]+/u)
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => GROUP_ID_PATTERN.test(entry) && entry !== HOME_GROUP);
+    return { packagesRepo: parseRepo(values.packagesRepo), hubPath, selfUpdate: values.selfUpdate, subscribed: [...new Set(subscribed)] };
   }
 
   // -------------------------------------------------------------------------
@@ -538,10 +600,42 @@ export default async function plugin(bb: BbPluginApi) {
   // -------------------------------------------------------------------------
   // packages.json and the plugins folder
 
-  async function loadPackages() {
+  /** Every group in the repository: home (the root) plus the root packages.json "groups". */
+  async function listGroups(): Promise<Group[]> {
     const { packagesRepo } = await readConfig();
     const dir = await syncMirror(packagesRepo);
-    const file = packagesFileSchema.parse(JSON.parse(await git(["show", "HEAD:packages.json"], dir)));
+    const root = packagesFileSchema.parse(JSON.parse(await git(["show", "HEAD:packages.json"], dir)));
+    const groups: Group[] = [{ id: HOME_GROUP, name: root.name ?? "Home", path: "" }];
+    for (const entry of root.groups ?? []) {
+      const id = entry.id.toLowerCase();
+      const folder = entry.path.replace(/^\/+|\/+$/gu, "");
+      if (!GROUP_ID_PATTERN.test(id) || id === HOME_GROUP || !PATH_PATTERN.test(folder) || groups.some((group) => group.id === id)) continue;
+      groups.push({ id, name: entry.name ?? id, path: folder });
+    }
+    return groups;
+  }
+
+  async function findGroup(groupId: string | undefined): Promise<Group> {
+    const wanted = (groupId ?? HOME_GROUP).trim().toLowerCase() || HOME_GROUP;
+    const group = (await listGroups()).find((candidate) => candidate.id === wanted);
+    if (group === undefined) throw new Error(`There is no group "${wanted}". Run \`bb hub group\` to list them.`);
+    return group;
+  }
+
+  /** The home group and the groups this machine subscribes to, home first. */
+  async function subscribedGroups(): Promise<Group[]> {
+    const { subscribed } = await readConfig();
+    const groups = await listGroups();
+    return groups.filter((group) => group.id === HOME_GROUP || subscribed.includes(group.id));
+  }
+
+  async function loadPackages(groupId?: string) {
+    const { packagesRepo } = await readConfig();
+    const group = await findGroup(groupId);
+    const dir = await syncMirror(packagesRepo);
+    const fileText = await git(["show", `HEAD:${inGroup(group, "packages.json")}`], dir).catch(() => null);
+    if (fileText === null) throw new Error(`Group ${group.id} has no ${inGroup(group, "packages.json")}.`);
+    const file = packagesFileSchema.parse(JSON.parse(fileText));
     const specs: PackageSpec[] = [];
     const errors: string[] = [];
     const seen = new Set<string>();
@@ -549,9 +643,10 @@ export default async function plugin(bb: BbPluginApi) {
     // (package.json with a "bb" section) is a package, except the hub itself
     // and anything in "exclude". Uploading a folder there is all it takes.
     const { hubPath } = await readConfig();
-    const excluded = new Set((file.exclude ?? []).map((entry) => entry.replace(/\/+$/u, "")));
+    // include/exclude paths are relative to the group's folder.
+    const excluded = new Set((file.exclude ?? []).map((entry) => inGroup(group, entry.replace(/\/+$/u, ""))));
     for (const pattern of file.include ?? []) {
-      const parent = pattern.replace(/\/\*$/u, "").replace(/\/+$/u, "");
+      const parent = inGroup(group, pattern.replace(/\/\*$/u, "").replace(/\/+$/u, ""));
       if (!pattern.endsWith("/*") || !PATH_PATTERN.test(parent)) {
         errors.push(`Unsupported include pattern "${pattern}" (use "<folder>/*").`);
         continue;
@@ -574,7 +669,7 @@ export default async function plugin(bb: BbPluginApi) {
         const key = `${repoKey(packagesRepo)}|${folder}`;
         if (!seen.has(key)) {
           seen.add(key);
-          specs.push({ ...packagesRepo, path: folder, ref: null });
+          specs.push({ ...packagesRepo, path: folder, ref: null, group: group.id });
         }
       }
     }
@@ -587,14 +682,15 @@ export default async function plugin(bb: BbPluginApi) {
         const key = `${repoKey(repo)}|${folder}`;
         if (!seen.has(key)) {
           seen.add(key);
-          specs.push({ ...repo, path: folder, ref: entry.ref ?? null });
+          specs.push({ ...repo, path: folder, ref: entry.ref ?? null, group: group.id });
         }
       } catch (cause) {
         errors.push(errorMessage(cause));
       }
     }
+    // The shared schedule comes from the home group only.
     const intervalMinutes = file.syncIntervalMinutes ?? DEFAULT_SYNC_INTERVAL_MINUTES;
-    if (intervalMinutes !== syncIntervalMinutes) {
+    if (group.id === HOME_GROUP && intervalMinutes !== syncIntervalMinutes) {
       syncIntervalMinutes = intervalMinutes;
       await bb.storage.kv.set(SYNC_INTERVAL_KEY, intervalMinutes);
       bb.log.info(`sync interval is now ${intervalMinutes} min`);
@@ -608,7 +704,7 @@ export default async function plugin(bb: BbPluginApi) {
       marketplace.push({ id: entry.id, marketplace: entry.marketplace ?? null, source: entry.source ?? null, subdirectory: entry.subdirectory ?? null });
     }
     const uninstall = [...new Set((file.uninstall ?? []).map((id) => id.toLowerCase()).filter((id) => ENTRY_ID_PATTERN.test(id)))];
-    return { from: `${repoDisplay(packagesRepo)}/packages.json`, packagesRepo, specs, marketplace, uninstall, errors };
+    return { from: `${repoDisplay(packagesRepo)}/${inGroup(group, "packages.json")}`, packagesRepo, group, specs, marketplace, uninstall, errors };
   }
 
   const isLocal = (spec: PackageSpec, packagesRepo: RepoRef) => repoKey(spec) === repoKey(packagesRepo);
@@ -637,6 +733,17 @@ export default async function plugin(bb: BbPluginApi) {
   // -------------------------------------------------------------------------
   // Install / update one package
 
+  /** The folder (inside its repository) an installed git plugin came from, read from bb's cache path. */
+  function installedFolder(plugin: { rootDir: string }): string | null {
+    const match = plugin.rootDir.split(path.sep).join("/").match(/\/[0-9a-f]{40}(?:\/(.+))?$/u);
+    return match ? (match[1] ?? "") : null;
+  }
+  /** Which group a folder of the shared repository belongs to. */
+  function groupOfFolder(folder: string, groups: Group[]): string {
+    const owner = groups.filter((group) => group.path !== "" && (folder === group.path || folder.startsWith(`${group.path}/`)));
+    return owner.sort((a, b) => b.path.length - a.path.length)[0]?.id ?? HOME_GROUP;
+  }
+
   async function installOrUpdate(spec: PackageSpec, label: string): Promise<SyncResult> {
     const dir = await syncMirror(spec);
     const pluginId = pluginIdForPackageName((await readPackageJson(dir, spec.path)).name);
@@ -656,6 +763,18 @@ export default async function plugin(bb: BbPluginApi) {
         pluginId,
         outcome: "other-source",
         detail: `Installed from ${installed.source}. Run \`bb hub adopt ${spec.path || repoDisplay(spec)}\` to switch it to ${repoDisplay(spec)} (this deletes the plugin's settings and data).`,
+        version: installed.version,
+      };
+    }
+    // Same repository, but another folder (e.g. another group's copy). Switching
+    // means reinstalling, which resets the plugin's data, so it is never automatic.
+    const from = installedFolder(installed);
+    if (from !== null && from !== spec.path) {
+      return {
+        repo: label,
+        pluginId,
+        outcome: "other-source",
+        detail: `Installed from ${from}. Run \`bb hub adopt ${spec.path}\` to switch to this copy (version ${(await readPackageJson(dir, spec.path).catch(() => null))?.version ?? "?"}; this resets the plugin's settings and data).`,
         version: installed.version,
       };
     }
@@ -815,15 +934,18 @@ export default async function plugin(bb: BbPluginApi) {
   async function editPackagesJson(
     mutate: (document: Record<string, unknown>) => Record<string, unknown>,
     message: string,
+    groupId?: string,
   ): Promise<string | null> {
     const { packagesRepo } = await readConfig();
+    const group = await findGroup(groupId);
     const work = await workingClone(packagesRepo);
-    const file = path.join(work, "packages.json");
+    const relative = inGroup(group, "packages.json");
+    const file = path.join(work, relative);
     const document = z.record(z.string(), z.unknown()).parse(JSON.parse(await readFile(file, "utf8")));
     const next = mutate(document);
     packagesFileSchema.parse(next);
     await writeFile(file, `${JSON.stringify(next, null, 2)}\n`);
-    return commitAndPush(work, ["packages.json"], message, packagesRepo);
+    return commitAndPush(work, [relative], group.id === HOME_GROUP ? message : `${group.name}: ${message}`, packagesRepo);
   }
 
   /** packages.json with `pluginId` taken off the uninstall list (it's wanted again). */
@@ -837,12 +959,18 @@ export default async function plugin(bb: BbPluginApi) {
    * put its id on the uninstall list, so every hub uninstalls it (deleting
    * its data) at the next sync. This machine uninstalls it right away.
    */
-  async function deleteLocalPlugin(arg: string) {
+  async function deleteLocalPlugin(arg: string, groupId?: string) {
     const outcome = await serialize(async () => {
       const { packagesRepo, hubPath } = await readConfig();
-      const folder = (arg.includes("/") ? arg : `${PLUGINS_FOLDER}/${arg}`).replace(/^\/+|\/+$/gu, "");
-      if (!folder.startsWith(`${PLUGINS_FOLDER}/`) || folder.split("/").length !== 2 || !PATH_PATTERN.test(folder)) {
-        throw new Error(`"${arg}" is not a local plugin folder (expected plugins/<name>).`);
+      const allGroups = await listGroups();
+      // A full path names its group; a bare name is in the given group (default home).
+      const group = arg.includes("/")
+        ? (allGroups.find((candidate) => candidate.id === groupOfFolder(arg.replace(/^\/+|\/+$/gu, ""), allGroups)) as Group)
+        : await findGroup(groupId);
+      const pluginsDir = inGroup(group, PLUGINS_FOLDER);
+      const folder = (arg.includes("/") ? arg : `${pluginsDir}/${arg}`).replace(/^\/+|\/+$/gu, "");
+      if (!folder.startsWith(`${pluginsDir}/`) || folder.slice(pluginsDir.length + 1).includes("/") || !PATH_PATTERN.test(folder)) {
+        throw new Error(`"${arg}" is not a local plugin folder (expected ${pluginsDir}/<name>).`);
       }
       if (folder === hubPath) throw new Error("The hub can't delete itself.");
       const work = await workingClone(packagesRepo);
@@ -850,18 +978,19 @@ export default async function plugin(bb: BbPluginApi) {
       if (manifestText === null) throw new Error(`${folder} doesn't exist in the shared repository.`);
       const pluginId = pluginIdForPackageName(packageJsonSchema.parse(JSON.parse(manifestText)).name);
       await rm(path.join(work, folder), { recursive: true, force: true });
-      const file = path.join(work, "packages.json");
+      const packagesRelative = inGroup(group, "packages.json");
+      const file = path.join(work, packagesRelative);
       const document = z.record(z.string(), z.unknown()).parse(JSON.parse(await readFile(file, "utf8")));
       const uninstall = z.array(z.string()).catch([]).parse(document.uninstall ?? []);
       const exclude = z.array(z.string()).catch([]).parse(document.exclude ?? []);
       const next = {
         ...document,
-        ...(document.exclude !== undefined ? { exclude: exclude.filter((entry) => entry.replace(/\/+$/u, "") !== folder) } : {}),
+        ...(document.exclude !== undefined ? { exclude: exclude.filter((entry) => inGroup(group, entry.replace(/\/+$/u, "")) !== folder) } : {}),
         uninstall: [...new Set([...uninstall, pluginId])],
       };
       packagesFileSchema.parse(next);
       await writeFile(file, `${JSON.stringify(next, null, 2)}\n`);
-      const commit = await commitAndPush(work, [folder, "packages.json"], `Delete local plugin ${folder} (${pluginId}) and uninstall it everywhere`, packagesRepo);
+      const commit = await commitAndPush(work, [folder, packagesRelative], `Delete local plugin ${folder} (${pluginId}) and uninstall it everywhere`, packagesRepo);
       bb.log.info(`deleted ${folder} (${pluginId}) as ${commit ?? "?"}`);
       return { folder, pluginId, commit };
     });
@@ -871,7 +1000,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { ...outcome, removedHere, guaranteedBy: scheduleView(null).guaranteedBy };
   }
 
-  async function addMarketplacePlugin(arg: string) {
+  async function addMarketplacePlugin(arg: string, groupId?: string) {
     const wanted = parseEntryArg(arg);
     const outcome = await serialize(async () => {
       // Resolve it now, so a typo or an incompatible entry fails before any commit.
@@ -895,7 +1024,7 @@ export default async function plugin(bb: BbPluginApi) {
           throw new Error(`${entry.id}@${marketplace} is already in packages.json.`);
         }
         return { ...withoutUninstall(document, plan.pluginId), marketplace: [...list, entry] };
-      }, `Add ${entry.id}@${marketplace} from the marketplace to hub packages`);
+      }, `Add ${entry.id}@${marketplace} from the marketplace to hub packages`, groupId);
       return { entry: `${entry.id}@${marketplace}`, pluginId: plan.pluginId, displayName: plan.displayName, commit, compatible: plan.compatible, incompatibleReason: plan.incompatibleReason };
     });
     const report = await requestSync("marketplace plugin added");
@@ -904,7 +1033,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { ...outcome, guaranteedBy: scheduleView(null).guaranteedBy, sync };
   }
 
-  async function removeMarketplacePlugin(arg: string) {
+  async function removeMarketplacePlugin(arg: string, groupId?: string) {
     const wanted = parseEntryArg(arg);
     const outcome = await serialize(async () => {
       let removed: string[] = [];
@@ -914,7 +1043,7 @@ export default async function plugin(bb: BbPluginApi) {
         removed = list.filter((item) => !keep.includes(item)).map((item) => `${String(item.id)}@${String(item.marketplace ?? "any")}`);
         if (removed.length === 0) throw new Error(`${arg} is not in packages.json's marketplace list.`);
         return { ...document, marketplace: keep };
-      }, `Remove ${arg} from the marketplace hub packages`);
+      }, `Remove ${arg} from the marketplace hub packages`, groupId);
       return { removed, commit };
     });
     bb.realtime.publish(HUB_CHANGED, { removed: outcome.removed });
@@ -943,24 +1072,25 @@ export default async function plugin(bb: BbPluginApi) {
    * when the repository has a new commit. Returns a result only on a change
    * or a failure.
    */
-  async function ensureTeamMarketplace(packagesRepo: RepoRef, dir: string): Promise<SyncResult | null> {
+  async function ensureTeamMarketplace(packagesRepo: RepoRef, dir: string, group: Group): Promise<SyncResult | null> {
     if (!(await settings.get()).registerMarketplace) return null;
-    const text = await git(["show", "HEAD:marketplace.json"], dir).catch(() => null);
+    const text = await git(["show", `HEAD:${inGroup(group, "marketplace.json")}`], dir).catch(() => null);
     if (text === null) return null;
-    const label = "team marketplace";
+    const label = `marketplace: ${group.name}`;
+    const refreshedKey = `${MARKETPLACE_REFRESHED_KEY}:${group.id}`;
     try {
       const name = z.object({ name: z.string().min(1) }).parse(JSON.parse(text)).name;
       const head = (await git(["rev-parse", "HEAD"], dir)).trim();
       const known = (await bb.sdk.plugins.marketplaces.list()).find((marketplace) => marketplace.name === name);
       if (known === undefined) {
-        await bb.sdk.plugins.marketplaces.add({ source: `git:${repoUrl(packagesRepo)}` });
-        await bb.storage.kv.set(MARKETPLACE_REFRESHED_KEY, head);
+        await bb.sdk.plugins.marketplaces.add({ source: `git:${repoUrl(packagesRepo)}`, ...(group.path ? { subdirectory: group.path } : {}) });
+        await bb.storage.kv.set(refreshedKey, head);
         bb.log.info(`added the ${name} marketplace from ${repoDisplay(packagesRepo)}`);
         return { repo: label, pluginId: null, outcome: "installed", detail: `"${name}" added to Settings → Plugin marketplaces`, version: null };
       }
-      if ((await bb.storage.kv.get<string>(MARKETPLACE_REFRESHED_KEY)) !== head) {
+      if ((await bb.storage.kv.get<string>(refreshedKey)) !== head) {
         await bb.sdk.plugins.marketplaces.refresh({ name });
-        await bb.storage.kv.set(MARKETPLACE_REFRESHED_KEY, head);
+        await bb.storage.kv.set(refreshedKey, head);
       }
       return null;
     } catch (cause) {
@@ -976,57 +1106,105 @@ export default async function plugin(bb: BbPluginApi) {
     let startSelfUpdate = false;
     let packagesDir: string | null = null;
     try {
-      const packages = await loadPackages();
-      from = packages.from;
-      packagesDir = await syncMirror(packages.packagesRepo);
-      const marketplaceResult = await ensureTeamMarketplace(packages.packagesRepo, packagesDir);
-      if (marketplaceResult !== null) results.push(marketplaceResult);
-      for (const error of packages.errors) {
-        results.push({ repo: "packages.json", pluginId: null, outcome: "failed", detail: error, version: null });
-      }
-      const folderForId = new Map<string, string>();
-      for (const spec of packages.specs) {
-        const label = labelFor(spec, packages.packagesRepo);
+      const { packagesRepo } = await readConfig();
+      const groups = await subscribedGroups();
+      const allGroups = await listGroups();
+      packagesDir = await syncMirror(packagesRepo);
+      const loaded: Awaited<ReturnType<typeof loadPackages>>[] = [];
+      for (const group of groups) {
         try {
-          // bb installs one plugin per id; a second folder with the same id
-          // would fight the first, so it is reported instead of installed.
-          const id = pluginIdForPackageName((await readPackageJson(await syncMirror(spec), spec.path)).name);
-          const first = folderForId.get(id);
-          if (first !== undefined) {
-            results.push({ repo: label, pluginId: id, outcome: "failed", detail: `Same plugin id "${id}" as ${first}; rename one package.`, version: null });
-            continue;
-          }
-          folderForId.set(id, label);
-          results.push(await installOrUpdate(spec, label));
+          loaded.push(await loadPackages(group.id));
         } catch (cause) {
-          results.push({ repo: label, pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null });
+          results.push({ repo: `${group.id}: packages.json`, pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null });
+        }
+        const marketplaceResult = await ensureTeamMarketplace(packagesRepo, packagesDir, group);
+        if (marketplaceResult !== null) results.push(marketplaceResult);
+      }
+      from = loaded.map((packages) => packages.from).join(", ");
+      for (const packages of loaded) {
+        for (const error of packages.errors) {
+          results.push({ repo: `${packages.group.id}: packages.json`, pluginId: null, outcome: "failed", detail: error, version: null });
         }
       }
-      for (const entry of packages.marketplace) {
+
+      // Every candidate across the subscribed groups, with its plugin id and
+      // version. The same repository folder listed twice counts once.
+      type Candidate = { spec: PackageSpec; label: string; group: Group; order: number; version: string | null };
+      const byId = new Map<string, Candidate[]>();
+      const seenSpecs = new Set<string>();
+      let order = 0;
+      for (const packages of loaded) {
+        for (const spec of packages.specs) {
+          const key = `${repoKey(spec)}|${spec.path}`;
+          if (seenSpecs.has(key)) continue;
+          seenSpecs.add(key);
+          const label = labelFor(spec, packagesRepo);
+          try {
+            const manifest = await readPackageJson(await syncMirror(spec), spec.path);
+            const id = pluginIdForPackageName(manifest.name);
+            byId.set(id, [...(byId.get(id) ?? []), { spec, label, group: packages.group, order: order++, version: manifest.version ?? null }]);
+          } catch (cause) {
+            results.push({ repo: label, pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null });
+          }
+        }
+      }
+      // A clash (one plugin id in several places) goes to the newest version;
+      // on a tie, the home group, then group order.
+      const folderForId = new Map<string, string>();
+      for (const [id, candidates] of byId) {
+        const ranked = [...candidates].sort((a, b) => compareVersions(b.version, a.version) || a.order - b.order);
+        const winner = ranked[0] as Candidate;
+        folderForId.set(id, winner.label);
+        for (const loser of ranked.slice(1)) {
+          results.push({
+            repo: loser.label,
+            pluginId: id,
+            outcome: "skipped",
+            detail: `${compareVersions(winner.version, loser.version) > 0 ? "newer" : "same"} version ${winner.version ?? "?"} in ${winner.label} (${winner.group.name}) wins`,
+            version: loser.version,
+          });
+        }
         try {
-          results.push(await syncMarketplaceEntry(entry));
+          results.push(await installOrUpdate(winner.spec, winner.label));
         } catch (cause) {
-          results.push({ repo: marketplaceLabel(entry), pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null });
+          results.push({ repo: winner.label, pluginId: id, outcome: "failed", detail: errorMessage(cause), version: null });
+        }
+      }
+      const seenEntries = new Set<string>();
+      for (const packages of loaded) {
+        for (const entry of packages.marketplace) {
+          const key = `${entry.id}@${entry.marketplace ?? ""}`;
+          if (seenEntries.has(key)) continue;
+          seenEntries.add(key);
+          try {
+            results.push(await syncMarketplaceEntry(entry));
+          } catch (cause) {
+            results.push({ repo: marketplaceLabel(entry), pluginId: null, outcome: "failed", detail: errorMessage(cause), version: null });
+          }
         }
       }
       // Deleted local plugins: uninstall them (this deletes their data), but
-      // only when this hub installed them from the shared repository, and
-      // never while a package with that id is still listed.
+      // only when this hub installed them from that group's own folders in the
+      // shared repository, and never while a package with that id is listed.
       const listedIds = new Set([...folderForId.keys(), ...results.map((result) => result.pluginId).filter((id): id is string => id !== null)]);
       const installedNow = (await bb.sdk.plugins.list()).plugins;
-      const sharedSource = `git:${repoUrl(packages.packagesRepo)}`.toLowerCase();
-      for (const id of packages.uninstall) {
-        if (id === bb.pluginId || listedIds.has(id)) continue;
-        const plugin = installedNow.find((entry) => entry.id === id);
-        if (plugin === undefined) continue;
-        const source = plugin.source.toLowerCase();
-        if (source !== sharedSource && !source.startsWith(`${sharedSource}@`)) continue;
-        try {
-          await bb.sdk.plugins.remove({ pluginId: id });
-          bb.log.info(`uninstalled ${id}: it was deleted from the shared repository`);
-          results.push({ repo: `deleted:${id}`, pluginId: id, outcome: "removed", detail: "deleted from the shared repository; uninstalled with its data", version: plugin.version });
-        } catch (cause) {
-          results.push({ repo: `deleted:${id}`, pluginId: id, outcome: "failed", detail: `could not uninstall: ${errorMessage(cause)}`, version: plugin.version });
+      const sharedSource = `git:${repoUrl(packagesRepo)}`.toLowerCase();
+      for (const packages of loaded) {
+        for (const id of packages.uninstall) {
+          if (id === bb.pluginId || listedIds.has(id)) continue;
+          const plugin = installedNow.find((entry) => entry.id === id);
+          if (plugin === undefined) continue;
+          const source = plugin.source.toLowerCase();
+          if (source !== sharedSource && !source.startsWith(`${sharedSource}@`)) continue;
+          const folder = installedFolder(plugin);
+          if (folder !== null && groupOfFolder(folder, allGroups) !== packages.group.id) continue;
+          try {
+            await bb.sdk.plugins.remove({ pluginId: id });
+            bb.log.info(`uninstalled ${id}: it was deleted from group ${packages.group.id}`);
+            results.push({ repo: `deleted:${id}`, pluginId: id, outcome: "removed", detail: `deleted from ${packages.group.name}; uninstalled with its data`, version: plugin.version });
+          } catch (cause) {
+            results.push({ repo: `deleted:${id}`, pluginId: id, outcome: "failed", detail: `could not uninstall: ${errorMessage(cause)}`, version: plugin.version });
+          }
         }
       }
     } catch (cause) {
@@ -1088,7 +1266,20 @@ export default async function plugin(bb: BbPluginApi) {
   /** "hello" or "plugins/hello" → a folder in the packages repository. */
   async function resolveFolder(arg: string): Promise<PackageSpec> {
     const { packagesRepo } = await readConfig();
-    const folder = (arg.includes("/") ? arg : `${PLUGINS_FOLDER}/${arg}`).replace(/\/+$/u, "");
+    let folder = arg.replace(/^\/+|\/+$/gu, "");
+    if (!folder.includes("/")) {
+      // A bare name: the first group (home first) that has plugins/<name>.
+      const dir = await syncMirror(packagesRepo);
+      let found: string | null = null;
+      for (const group of await listGroups()) {
+        const candidate = `${inGroup(group, PLUGINS_FOLDER)}/${folder}`;
+        if (await git(["cat-file", "-e", `HEAD:${candidate}/package.json`], dir).then(() => true, () => false)) {
+          found = candidate;
+          break;
+        }
+      }
+      folder = found ?? `${PLUGINS_FOLDER}/${folder}`;
+    }
     if (!PATH_PATTERN.test(folder)) throw new Error(`Invalid folder "${arg}".`);
     return { ...packagesRepo, path: folder, ref: null };
   }
@@ -1112,7 +1303,8 @@ export default async function plugin(bb: BbPluginApi) {
       const pluginId = pluginIdForPackageName((await readPackageJson(dir, spec.path)).name);
       if (pluginId === bb.pluginId) throw new Error("The hub cannot adopt itself; reinstall it as JOIN.md describes.");
       const installed = (await bb.sdk.plugins.list()).plugins.find((entry) => entry.id === pluginId);
-      if (installed !== undefined && !isHubSource(installed.source, spec)) {
+      const fromFolder = installed === undefined ? null : installedFolder(installed);
+      if (installed !== undefined && (!isHubSource(installed.source, spec) || (fromFolder !== null && fromFolder !== spec.path))) {
         await bb.sdk.plugins.remove({ pluginId });
         bb.log.info(`removed ${pluginId} (was ${installed.source}) to adopt it`);
       }
@@ -1122,13 +1314,40 @@ export default async function plugin(bb: BbPluginApi) {
     return result;
   }
 
-  async function listHub() {
+  /** Subscribe this machine to a group (it installs the group's plugins), or unsubscribe. */
+  async function setSubscribed(groupId: string, on: boolean) {
+    const group = await findGroup(groupId);
+    if (group.id === HOME_GROUP) throw new Error("The home group is always subscribed.");
+    const { subscribed, packagesRepo } = await readConfig();
+    const next = on ? [...new Set([...subscribed, group.id])] : subscribed.filter((id) => id !== group.id);
+    if (!on) {
+      // Its plugins stay installed (like a removal), but its marketplace leaves Settings.
+      const text = await git(["show", `HEAD:${inGroup(group, "marketplace.json")}`], await syncMirror(packagesRepo)).catch(() => null);
+      const name = text === null ? null : z.object({ name: z.string() }).safeParse(JSON.parse(text)).data?.name ?? null;
+      if (name !== null) await bb.sdk.plugins.marketplaces.remove({ name }).catch(() => undefined);
+      await bb.storage.kv.delete(`${MARKETPLACE_REFRESHED_KEY}:${group.id}`);
+    }
+    // The settings change starts a sync, which installs a newly subscribed group's plugins.
+    await settings.experimental_set({ groups: next.join(",") });
+    bb.log.info(`${on ? "subscribed to" : "unsubscribed from"} group ${group.id}`);
+    bb.realtime.publish(HUB_CHANGED, { group: group.id });
+    return { group: group.id, name: group.name, subscribed: on, guaranteedBy: scheduleView(null).guaranteedBy };
+  }
+
+  async function listHub(groupId?: string) {
     const packages = await serialize(async () => {
       fetchedThisRound.clear();
-      return loadPackages();
+      return loadPackages(groupId);
     });
+    const { subscribed } = await readConfig();
+    const groups = (await listGroups()).map((group) => ({
+      ...group,
+      subscribed: group.id === HOME_GROUP || subscribed.includes(group.id),
+      home: group.id === HOME_GROUP,
+    }));
+    const pluginsDir = inGroup(packages.group, PLUGINS_FOLDER);
     const dir = await syncMirror(packages.packagesRepo);
-    const tree = await git(["ls-tree", "-d", "--name-only", `HEAD:${PLUGINS_FOLDER}`], dir).catch(() => "");
+    const tree = await git(["ls-tree", "-d", "--name-only", `HEAD:${pluginsDir}`], dir).catch(() => "");
     const installedPlugins = (await bb.sdk.plugins.list()).plugins;
     const installed = new Map(installedPlugins.map((entry) => [entry.id, entry.version]));
     const packageFolders = new Set(
@@ -1136,7 +1355,7 @@ export default async function plugin(bb: BbPluginApi) {
     );
     const folders: PluginFolder[] = [];
     for (const name of tree.split("\n").map((line) => line.trim()).filter(Boolean)) {
-      const folder = `${PLUGINS_FOLDER}/${name}`;
+      const folder = `${pluginsDir}/${name}`;
       const manifest = await readPackageJson(dir, folder).catch(() => null);
       if (manifest === null) continue;
       const pluginId = pluginIdForPackageName(manifest.name);
@@ -1152,6 +1371,8 @@ export default async function plugin(bb: BbPluginApi) {
     }
     return {
       repo: repoDisplay(packages.packagesRepo),
+      group: { id: packages.group.id, name: packages.group.name, path: packages.group.path },
+      groups,
       folders,
       packages: await Promise.all(
         packages.specs.map(async (spec) => {
@@ -1473,7 +1694,7 @@ export default async function plugin(bb: BbPluginApi) {
    * "remote" entry goes into packages.json, and every hub installs it from
    * that repository. Private repositories can't be added.
    */
-  async function addRemotePlugin(text: string, options: { subdir?: string }) {
+  async function addRemotePlugin(text: string, options: { subdir?: string; group?: string }) {
     const result = await serialize(async () => {
       const { packagesRepo } = await readConfig();
       const parsed = parseRepoInput(text);
@@ -1496,7 +1717,7 @@ export default async function plugin(bb: BbPluginApi) {
         const label = labelFor(spec, packagesRepo);
         // bb installs one plugin per id, so the id must be new.
         fetchedThisRound.clear();
-        const packages = await loadPackages();
+        const packages = await loadPackages(options.group);
         for (const other of packages.specs) {
           if (repoKey(other) === repoKey(spec) && other.path === folder) throw new Error(`${label} is already a remote plugin.`);
           const otherId = await readPackageJson(await syncMirror(other), other.path).then((manifest) => pluginIdForPackageName(manifest.name), () => null);
@@ -1516,7 +1737,7 @@ export default async function plugin(bb: BbPluginApi) {
         const commit = await editPackagesJson((document) => {
           const list = z.array(z.record(z.string(), z.unknown())).catch([]).parse(document.remote ?? []);
           return { ...withoutUninstall(document, pluginId), remote: [...list, entry] };
-        }, `Add remote plugin ${label}`);
+        }, `Add remote plugin ${label}`, options.group);
         bb.log.info(`added remote plugin ${label} (${pluginId}) as ${commit ?? "?"}`);
         return { folder: label, pluginId, commit, warning, unchanged: false, kind: "remote" as const };
       } finally {
@@ -1530,7 +1751,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Stop pointing to a remote plugin (machines keep it installed). */
-  async function removeRemotePlugin(text: string, pathFilter?: string) {
+  async function removeRemotePlugin(text: string, pathFilter?: string, groupId?: string) {
     const outcome = await serialize(async () => {
       const parsed = parseRepoInput(text);
       const folder = (pathFilter ?? parsed.path ?? "").replace(/^\/+|\/+$/gu, "");
@@ -1551,7 +1772,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
         if (removed.length === 0) throw new Error(`${text} is not a remote plugin.`);
         return next;
-      }, `Remove remote plugin ${repoDisplay(parsed.repo)}${folder ? `/${folder}` : ""}`);
+      }, `Remove remote plugin ${repoDisplay(parsed.repo)}${folder ? `/${folder}` : ""}`, groupId);
       return { removed, commit };
     });
     bb.realtime.publish(HUB_CHANGED, { removed: outcome.removed });
@@ -1560,13 +1781,15 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function addPlugin(
     source: AddSource,
-    options: { name?: string; subdir?: string; force?: boolean },
+    options: { name?: string; subdir?: string; force?: boolean; group?: string },
   ) {
     if (source.kind === "text" && (await isRepoSource(source.source, source.cwd))) {
-      return addRemotePlugin(source.source, { subdir: options.subdir });
+      return addRemotePlugin(source.source, { subdir: options.subdir, group: options.group });
     }
     const result = await serialize(async () => {
       const { packagesRepo, hubPath } = await readConfig();
+      const group = await findGroup(options.group);
+      const pluginsDir = inGroup(group, PLUGINS_FOLDER);
       const scratch = await scratchDir();
       try {
         const { dir: base, description } = await materialize(source, scratch);
@@ -1574,17 +1797,18 @@ export default async function plugin(bb: BbPluginApi) {
         const { pluginId, warning } = await checkManifest(pluginDir);
         const folderName = (options.name?.trim() || pluginId).toLowerCase();
         if (!FOLDER_NAME_PATTERN.test(folderName)) throw new Error(`Folder name "${folderName}" must use lowercase letters, digits, ".", "_", "-".`);
-        const folder = `${PLUGINS_FOLDER}/${folderName}`;
+        const folder = `${pluginsDir}/${folderName}`;
         if (folder === hubPath || pluginId === bb.pluginId) throw new Error("That is the hub itself; push changes to it directly.");
 
         const work = await workingClone(packagesRepo);
-        const dest = path.join(work, PLUGINS_FOLDER, folderName);
-        // bb installs one plugin per id, so two folders can't share one.
-        for (const entry of await readdir(path.join(work, PLUGINS_FOLDER), { withFileTypes: true }).catch(() => [])) {
+        const dest = path.join(work, pluginsDir, folderName);
+        // Within one group, two folders can't share a plugin id. (Across groups
+        // they can: the newest version wins.)
+        for (const entry of await readdir(path.join(work, pluginsDir), { withFileTypes: true }).catch(() => [])) {
           if (!entry.isDirectory() || entry.name === folderName) continue;
-          const other = await readFile(path.join(work, PLUGINS_FOLDER, entry.name, "package.json"), "utf8")
+          const other = await readFile(path.join(work, pluginsDir, entry.name, "package.json"), "utf8")
             .then((text) => pluginIdForPackageName((JSON.parse(text) as { name?: string }).name ?? ""), () => null);
-          if (other === pluginId) throw new Error(`Plugin id "${pluginId}" is already used by ${PLUGINS_FOLDER}/${entry.name}.`);
+          if (other === pluginId) throw new Error(`Plugin id "${pluginId}" is already used by ${pluginsDir}/${entry.name}.`);
         }
         if (await access(dest).then(() => true, () => false)) {
           if (!options.force) throw new Error(`${folder} already exists (use force to replace it).`);
@@ -1594,11 +1818,12 @@ export default async function plugin(bb: BbPluginApi) {
         if (!(await access(path.join(dest, ".gitignore")).then(() => true, () => false))) {
           await writeFile(path.join(dest, ".gitignore"), "node_modules/\ndist/\n");
         }
-        const packagesFile = path.join(work, "packages.json");
+        const packagesRelative = inGroup(group, "packages.json");
+        const packagesFile = path.join(work, packagesRelative);
         const packagesDoc = z.record(z.string(), z.unknown()).parse(JSON.parse(await readFile(packagesFile, "utf8")));
         const cleaned = withoutUninstall(packagesDoc, pluginId);
         if (cleaned !== packagesDoc) await writeFile(packagesFile, `${JSON.stringify(cleaned, null, 2)}\n`);
-        const commit = await commitAndPush(work, [folder, "packages.json"], `Add plugin ${folderName} (from ${description})`, packagesRepo);
+        const commit = await commitAndPush(work, [folder, packagesRelative], `${group.id === HOME_GROUP ? "" : `${group.name}: `}Add plugin ${folderName} (from ${description})`, packagesRepo);
         if (commit === null) return { folder, pluginId, commit: null, warning, unchanged: true, kind: "local" as const };
         bb.log.info(`added ${folder} (${pluginId}) from ${description} as ${commit}`);
         return { folder, pluginId, commit, warning, unchanged: false, kind: "local" as const };
@@ -1670,11 +1895,15 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(rpcContract, {
-    hub_list: async (_input, context) => {
+    hub_list: async (input, context) => {
       clientOnly(context, "hub_list");
       const lastSync = (await bb.storage.kv.get<SyncReport>(LAST_SYNC_KEY)) ?? null;
       const self = (await bb.sdk.plugins.list()).plugins.find((plugin) => plugin.id === bb.pluginId);
-      return { ...(await listHub()), lastSync, schedule: scheduleView(lastSync), hubVersion: self?.version ?? null };
+      return { ...(await listHub(input?.group)), lastSync, schedule: scheduleView(lastSync), hubVersion: self?.version ?? null };
+    },
+    hub_group_subscribe: ({ group, subscribed }, context) => {
+      clientOnly(context, "hub_group_subscribe");
+      return setSubscribed(group, subscribed);
     },
     hub_install: ({ path: folder }, context) => {
       clientOnly(context, "hub_install");
@@ -1688,21 +1917,21 @@ export default async function plugin(bb: BbPluginApi) {
       clientOnly(context, "hub_marketplace_search");
       return searchMarketplace(query);
     },
-    hub_marketplace_add: ({ entry }, context) => {
+    hub_marketplace_add: ({ entry, group }, context) => {
       clientOnly(context, "hub_marketplace_add");
-      return addMarketplacePlugin(entry);
+      return addMarketplacePlugin(entry, group);
     },
-    hub_marketplace_remove: ({ entry }, context) => {
+    hub_marketplace_remove: ({ entry, group }, context) => {
       clientOnly(context, "hub_marketplace_remove");
-      return removeMarketplacePlugin(entry);
+      return removeMarketplacePlugin(entry, group);
     },
-    hub_local_delete: ({ path: folder }, context) => {
+    hub_local_delete: ({ path: folder, group }, context) => {
       clientOnly(context, "hub_local_delete");
-      return deleteLocalPlugin(folder);
+      return deleteLocalPlugin(folder, group);
     },
-    hub_remote_remove: ({ repo, path: folder }, context) => {
+    hub_remote_remove: ({ repo, path: folder, group }, context) => {
       clientOnly(context, "hub_remote_remove");
-      return removeRemotePlugin(repo, folder);
+      return removeRemotePlugin(repo, folder, group);
     },
     hub_add_plugin: (input, context) => {
       clientOnly(context, "hub_add_plugin");
@@ -1712,7 +1941,7 @@ export default async function plugin(bb: BbPluginApi) {
           : input.archive !== undefined
             ? { kind: "archive", name: input.archive.name, data: input.archive.data }
             : { kind: "text", source: input.source ?? "" };
-      return addPlugin(source, { name: input.name, subdir: input.subdir, force: input.force });
+      return addPlugin(source, { name: input.name, subdir: input.subdir, force: input.force, group: input.group });
     },
   });
 
@@ -1728,6 +1957,9 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const toCliError = (cause: unknown) => new PluginCliError(errorMessage(cause));
   const jsonOption = { json: { type: "boolean", description: "Print JSON" } } as const;
+  const groupOption = {
+    group: { type: "string", placeholder: "id", description: "The group to change (default: home). `bb hub group` lists them." },
+  } as const;
   const folderPositional = [
     { name: "folder", description: 'A plugin folder in the packages repository: "hello" or "plugins/hello"', required: true },
   ] as const;
@@ -1738,10 +1970,10 @@ export default async function plugin(bb: BbPluginApi) {
       summary: "Keep the bb plugins in the shared public repository installed and up to date",
       commands: {
         list: cliCommand({
-          summary: "List the plugin folders in the packages repository, with install and package status",
-          options: jsonOption,
+          summary: "List a group's plugin folders, with install and package status",
+          options: { ...groupOption, ...jsonOption },
           async run({ options }) {
-            const hub = await listHub().catch((cause) => { throw toCliError(cause); });
+            const hub = await listHub(options.group).catch((cause) => { throw toCliError(cause); });
             if (options.json) return { exitCode: 0, stdout: JSON.stringify(hub) };
             return {
               exitCode: 0,
@@ -1774,29 +2006,41 @@ export default async function plugin(bb: BbPluginApi) {
           },
         }),
         packages: cliCommand({
-          summary: "Show what every hub installs: local plugins (plugins/ folders) and remote plugins (other public repos)",
-          options: jsonOption,
+          summary: "Show what this machine installs from each subscribed group (or one group with --group)",
+          options: { group: { type: "string", placeholder: "id", description: "Only this group" }, ...jsonOption },
           async run({ options }) {
-            const packages = await serialize(async () => {
+            const views = await serialize(async () => {
               fetchedThisRound.clear();
-              return loadPackages();
+              const groups = options.group ? [await findGroup(options.group)] : await subscribedGroups();
+              const out = [];
+              for (const group of groups) {
+                const packages = await loadPackages(group.id);
+                out.push({
+                  group: group.id,
+                  name: group.name,
+                  from: packages.from,
+                  local: packages.specs.filter((spec) => isLocal(spec, packages.packagesRepo)).map((spec) => labelFor(spec, packages.packagesRepo)),
+                  remote: packages.specs.filter((spec) => !isLocal(spec, packages.packagesRepo)).map((spec) => labelFor(spec, packages.packagesRepo)),
+                  marketplace: packages.marketplace.map((entry) => `${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}`),
+                  errors: packages.errors,
+                });
+              }
+              return out;
             }).catch((cause) => { throw toCliError(cause); });
-            const local = packages.specs.filter((spec) => isLocal(spec, packages.packagesRepo)).map((spec) => labelFor(spec, packages.packagesRepo));
-            const remote = packages.specs.filter((spec) => !isLocal(spec, packages.packagesRepo)).map((spec) => labelFor(spec, packages.packagesRepo));
-            const market = packages.marketplace.map((entry) => `${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}`);
-            const view = { from: packages.from, local, remote, marketplace: market, errors: packages.errors };
-            const section = (title: string, items: string[]) => [`${title}:`, ...(items.length === 0 ? ["  (none)"] : items.map((item) => `  ${item}`))];
+            const section = (title: string, items: string[]) => [`  ${title}:`, ...(items.length === 0 ? ["    (none)"] : items.map((item) => `    ${item}`))];
             return {
               exitCode: 0,
               stdout: options.json
-                ? JSON.stringify(view)
-                : [
-                    `From ${view.from}`,
-                    ...section("Local plugins", local),
-                    ...section("Remote plugins", remote),
-                    ...section("Marketplace plugins", market),
-                    ...view.errors,
-                  ].join("\n"),
+                ? JSON.stringify(views)
+                : views
+                    .flatMap((view) => [
+                      `${view.name} (${view.group}) — ${view.from}`,
+                      ...section("Local plugins", view.local),
+                      ...section("Remote plugins", view.remote),
+                      ...section("Marketplace plugins", view.marketplace),
+                      ...view.errors.map((error) => `  ${error}`),
+                    ])
+                    .join("\n"),
             };
           },
         }),
@@ -1811,13 +2055,55 @@ export default async function plugin(bb: BbPluginApi) {
             };
           },
         }),
-        marketplace: cliCommand({
-          summary: "Show the marketplace plugins every hub keeps installed (packages.json \"marketplace\")",
+        group: cliCommand({
+          summary: "List the groups in the shared repository and which ones this machine subscribes to",
           options: jsonOption,
+          async run({ options }) {
+            const { subscribed } = await readConfig();
+            const groups = (await listGroups().catch((cause) => { throw toCliError(cause); })).map((group) => ({
+              ...group,
+              subscribed: group.id === HOME_GROUP || subscribed.includes(group.id),
+            }));
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(groups) };
+            return {
+              exitCode: 0,
+              stdout: groups
+                .map((group) => `${group.subscribed ? "[subscribed]" : "[         ]"}  ${group.id}${group.id === HOME_GROUP ? " (always)" : ""} — ${group.name}  ${group.path || "(repository root)"}`)
+                .join("\n"),
+            };
+          },
+        }),
+        "group subscribe": cliCommand({
+          summary: "Subscribe this machine to a group: it installs and updates the group's plugins",
+          positionals: [{ name: "group", description: "The group id (see `bb hub group`)", required: true }],
+          async run({ positionals }) {
+            const result = await setSubscribed(positionals.group, true).catch((cause) => { throw toCliError(cause); });
+            const report = await requestSync("group subscribed");
+            const installed = report.results.filter((entry) => entry.outcome === "installed").map((entry) => entry.repo);
+            return {
+              exitCode: 0,
+              stdout: `Subscribed to ${result.name} (${result.group}).${installed.length > 0 ? ` Installed: ${installed.join(", ")}.` : ""}`,
+            };
+          },
+        }),
+        "group unsubscribe": cliCommand({
+          summary: "Unsubscribe this machine from a group (its plugins stay installed but stop updating)",
+          positionals: [{ name: "group", description: "The group id", required: true }],
+          async run({ positionals }) {
+            const result = await setSubscribed(positionals.group, false).catch((cause) => { throw toCliError(cause); });
+            return {
+              exitCode: 0,
+              stdout: `Unsubscribed from ${result.name} (${result.group}). Its plugins stay installed but stop updating; remove them with \`bb plugin remove <id>\` if you don't want them.`,
+            };
+          },
+        }),
+        marketplace: cliCommand({
+          summary: "Show a group's marketplace plugins (packages.json \"marketplace\")",
+          options: { ...groupOption, ...jsonOption },
           async run({ options }) {
             const packages = await serialize(async () => {
               fetchedThisRound.clear();
-              return loadPackages();
+              return loadPackages(options.group);
             }).catch((cause) => { throw toCliError(cause); });
             const entries = packages.marketplace.map((entry) => `${entry.id}${entry.marketplace ? `@${entry.marketplace}` : ""}`);
             return {
@@ -1854,9 +2140,9 @@ export default async function plugin(bb: BbPluginApi) {
           summary: "Add a marketplace plugin to packages.json (commits and pushes) so every hub installs it",
           description: "Pushes with the git credentials of the machine running bb. Use the entry from `bb hub marketplace search`.",
           positionals: [{ name: "entry", description: "<id> or <id>@<marketplace>, e.g. thread-hover-cards@bb-community", required: true }],
-          options: jsonOption,
+          options: { ...groupOption, ...jsonOption },
           async run({ positionals, options }) {
-            const added = await addMarketplacePlugin(positionals.entry).catch((cause) => { throw toCliError(cause); });
+            const added = await addMarketplacePlugin(positionals.entry, options.group).catch((cause) => { throw toCliError(cause); });
             if (options.json) return { exitCode: 0, stdout: JSON.stringify(added) };
             return {
               exitCode: added.sync?.outcome === "failed" ? 1 : 0,
@@ -1872,9 +2158,9 @@ export default async function plugin(bb: BbPluginApi) {
         "marketplace remove": cliCommand({
           summary: "Remove a marketplace plugin from packages.json (commits and pushes); machines keep it installed",
           positionals: [{ name: "entry", description: "<id> or <id>@<marketplace>", required: true }],
-          options: jsonOption,
+          options: { ...groupOption, ...jsonOption },
           async run({ positionals, options }) {
-            const removed = await removeMarketplacePlugin(positionals.entry).catch((cause) => { throw toCliError(cause); });
+            const removed = await removeMarketplacePlugin(positionals.entry, options.group).catch((cause) => { throw toCliError(cause); });
             if (options.json) return { exitCode: 0, stdout: JSON.stringify(removed) };
             return {
               exitCode: 0,
@@ -1891,6 +2177,7 @@ export default async function plugin(bb: BbPluginApi) {
           positionals: [{ name: "folder", description: 'The local plugin: "hello" or "plugins/hello"', required: true }],
           options: {
             yes: { type: "boolean", description: "Confirm: every member loses this plugin and all its data and settings" },
+            ...groupOption,
             ...jsonOption,
           },
           async run({ positionals, options }) {
@@ -1899,7 +2186,7 @@ export default async function plugin(bb: BbPluginApi) {
                 `Deleting ${positionals.folder} removes it from the shared repository and uninstalls it from every member's bb at the next sync. All of its data and settings will be lost on every machine. Re-run with --yes to confirm.`,
               );
             }
-            const deleted = await deleteLocalPlugin(positionals.folder).catch((cause) => { throw toCliError(cause); });
+            const deleted = await deleteLocalPlugin(positionals.folder, options.group).catch((cause) => { throw toCliError(cause); });
             if (options.json) return { exitCode: 0, stdout: JSON.stringify(deleted) };
             return {
               exitCode: 0,
@@ -1917,10 +2204,11 @@ export default async function plugin(bb: BbPluginApi) {
           positionals: [{ name: "repo", description: "The remote plugin's repo: owner/name, https URL, or GitHub folder link", required: true }],
           options: {
             path: { type: "string", placeholder: "folder", description: "Only the entry for this folder in that repo" },
+            ...groupOption,
             ...jsonOption,
           },
           async run({ positionals, options }) {
-            const removed = await removeRemotePlugin(positionals.repo, options.path).catch((cause) => { throw toCliError(cause); });
+            const removed = await removeRemotePlugin(positionals.repo, options.path, options.group).catch((cause) => { throw toCliError(cause); });
             if (options.json) return { exitCode: 0, stdout: JSON.stringify(removed) };
             return {
               exitCode: 0,
@@ -1942,12 +2230,13 @@ export default async function plugin(bb: BbPluginApi) {
             name: { type: "string", placeholder: "folder", description: "For copied plugins: folder name under plugins/ (default: the plugin id)" },
             subdir: { type: "string", placeholder: "path", description: "The plugin's folder inside the source, when it holds several" },
             force: { type: "boolean", description: "Replace plugins/<folder> if it already exists" },
+            ...groupOption,
             ...jsonOption,
           },
           async run({ positionals, options }, ctx) {
             const added = await addPlugin(
               { kind: "text", source: positionals.source, cwd: ctx.cwd },
-              { name: options.name, subdir: options.subdir, force: options.force },
+              { name: options.name, subdir: options.subdir, force: options.force, group: options.group },
             ).catch((cause) => { throw toCliError(cause); });
             if (options.json) return { exitCode: 0, stdout: JSON.stringify(added) };
             return {

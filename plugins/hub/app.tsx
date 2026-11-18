@@ -14,8 +14,11 @@ import { cn } from "@/lib/utils";
 
 type Rpc = ReturnType<typeof useRpc<typeof rpcContract>>;
 type Run = (key: string, action: () => Promise<unknown>) => Promise<void>;
+type GroupView = { id: string; name: string; path: string; subscribed: boolean; home: boolean };
 type HubData = {
   repo: string;
+  group: { id: string; name: string; path: string };
+  groups: GroupView[];
   folders: PluginFolder[];
   packages: PackageView[];
   marketplace: MarketplaceView[];
@@ -45,6 +48,7 @@ type MarketplaceView = {
 };
 
 const PROBLEM: SyncResult["outcome"][] = ["failed", "other-source"];
+const isSubscribed = (data: HubData) => data.groups.find((group) => group.id === data.group.id)?.subscribed ?? true;
 const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 function Title({ children }: { children: ReactNode }) {
@@ -62,6 +66,7 @@ function Row({
   action,
   icon,
   details,
+  statusText,
 }: {
   name: string;
   result: SyncResult | null;
@@ -69,9 +74,11 @@ function Row({
   icon?: ReactNode;
   /** Shown in a panel that drops down under the row from the info button. */
   details?: ReactNode;
+  /** Replaces the sync status, e.g. "not subscribed". */
+  statusText?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const status = result === null ? "pending" : result.outcome === "current" ? "up to date" : result.outcome;
+  const status = statusText ?? (result === null ? "pending" : result.outcome === "current" ? "up to date" : result.outcome);
   return (
     <li className="text-sm">
       <div className="flex items-center gap-2 px-3 py-1.5" title={result?.detail ?? undefined}>
@@ -163,6 +170,67 @@ function Empty({ children }: { children: ReactNode }) {
 }
 
 // ---------------------------------------------------------------------------
+// 0. Group selector
+
+function GroupSelector({
+  data,
+  selected,
+  onSelect,
+  busy,
+  rpc,
+  run,
+}: {
+  data: HubData;
+  selected: string;
+  onSelect: (group: string) => void;
+  busy: string | null;
+  rpc: Rpc;
+  run: Run;
+}) {
+  const current = data.groups.find((group) => group.id === selected) ?? data.groups[0];
+  return (
+    <div className="mt-3">
+      <div className="flex items-center gap-2">
+        <Icon name="Layers" className="size-4 shrink-0 text-muted-foreground" />
+        <select
+          value={current?.id}
+          onChange={(event) => onSelect(event.target.value)}
+          aria-label="Group"
+          className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm"
+        >
+          {data.groups.map((group) => (
+            <option key={group.id} value={group.id}>
+              {group.name}
+              {group.home ? " (home)" : group.subscribed ? " ✓" : ""}
+            </option>
+          ))}
+        </select>
+        {current === undefined || current.home ? (
+          <span className="shrink-0 text-xs text-muted-foreground">always subscribed</span>
+        ) : (
+          <Button
+            size="sm"
+            variant={current.subscribed ? "ghost" : "default"}
+            className="h-8 shrink-0"
+            disabled={busy !== null}
+            onClick={() =>
+              void run(`subscribe:${current.id}`, () => rpc.call("hub_group_subscribe", { group: current.id, subscribed: !current.subscribed }))
+            }
+          >
+            {busy === `subscribe:${current.id}` ? "…" : current.subscribed ? "Unsubscribe" : "Subscribe"}
+          </Button>
+        )}
+      </div>
+      {current !== undefined && !current.subscribed ? (
+        <p className="mt-1 text-xs text-muted-foreground">
+          This machine isn't subscribed to {current.name}, so it doesn't install these plugins. Subscribe to get them.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 1-2. Packages and marketplace plugins
 
 /** Local (folders in the shared repo) and remote (other public repos) plugins, in one list. */
@@ -182,6 +250,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
               key={entry.label}
               name={nameFor(entry)}
               result={resultFor(entry.label)}
+              statusText={isSubscribed(data) ? undefined : "not subscribed"}
               details={<Details entry={entry} result={resultFor(entry.label)} />}
               icon={
                 <span title={entry.kind === "remote" ? "remote plugin" : "local plugin"} className="shrink-0 text-muted-foreground">
@@ -198,7 +267,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
                     disabled={busy !== null}
                     onClick={() =>
                       void run(`rremove:${entry.label}`, () =>
-                        rpc.call("hub_remote_remove", { repo: entry.repo, ...(entry.path ? { path: entry.path } : {}) }),
+                        rpc.call("hub_remote_remove", { repo: entry.repo, ...(entry.path ? { path: entry.path } : {}), group: data.group.id }),
                       )
                     }
                   >
@@ -226,8 +295,8 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
           <DialogHeader>
             <DialogTitle>Delete {confirm === null ? "" : nameFor(confirm)}?</DialogTitle>
             <DialogDescription>
-              This removes <code>{confirm?.path}</code> from the shared repository and uninstalls it from every member's
-              bb at the next sync. <strong>All of the plugin's data and settings will be lost on every machine.</strong>{" "}
+              This removes <code>{confirm?.path}</code> from the {data.group.name} group and uninstalls it from the bb
+              of every member subscribed to it at the next sync. <strong>All of the plugin's data and settings will be lost on every machine.</strong>{" "}
               This can't be undone.
             </DialogDescription>
           </DialogHeader>
@@ -241,7 +310,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
               onClick={() => {
                 const entry = confirm;
                 setConfirm(null);
-                if (entry !== null) void run(`ldelete:${entry.label}`, () => rpc.call("hub_local_delete", { path: entry.path }));
+                if (entry !== null) void run(`ldelete:${entry.label}`, () => rpc.call("hub_local_delete", { path: entry.path, group: data.group.id }));
               }}
             >
               Delete plugin and its data
@@ -267,6 +336,7 @@ function MarketplacePlugins({ data, busy, rpc, run }: { data: HubData; busy: str
               key={item.entry}
               name={item.info?.name ?? item.entry}
               result={resultFor(item.label)}
+              statusText={isSubscribed(data) ? undefined : "not subscribed"}
               details={<MarketplaceDetails item={item} result={resultFor(item.label)} />}
               action={
                 <Button
@@ -275,7 +345,7 @@ function MarketplacePlugins({ data, busy, rpc, run }: { data: HubData; busy: str
                   className="size-6 text-muted-foreground hover:text-foreground"
                   aria-label={`Remove ${item.entry}`}
                   disabled={busy !== null}
-                  onClick={() => void run(`mremove:${item.entry}`, () => rpc.call("hub_marketplace_remove", { entry: item.entry }))}
+                  onClick={() => void run(`mremove:${item.entry}`, () => rpc.call("hub_marketplace_remove", { entry: item.entry, group: data.group.id }))}
                 >
                   <Icon name="X" className="size-3.5" />
                 </Button>
@@ -361,7 +431,7 @@ async function readDroppedFolder(root: DirEntry): Promise<{ path: string; file: 
   return out;
 }
 
-function AddPlugin({ busy, rpc, run }: { busy: string | null; rpc: Rpc; run: Run }) {
+function AddPlugin({ busy, rpc, run, group }: { busy: string | null; rpc: Rpc; run: Run; group: { id: string; name: string } }) {
   const [url, setUrl] = useState("");
   const [over, setOver] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -370,7 +440,7 @@ function AddPlugin({ busy, rpc, run }: { busy: string | null; rpc: Rpc; run: Run
   const add = (input: Parameters<Rpc["call"]>[1] & object) =>
     run("add", async () => {
       setMessage(null);
-      const added = await rpc.call("hub_add_plugin", input as never);
+      const added = await rpc.call("hub_add_plugin", { ...(input as object), group: group.id } as never);
       setUrl("");
       setMessage(
         added.unchanged
@@ -406,7 +476,7 @@ function AddPlugin({ busy, rpc, run }: { busy: string | null; rpc: Rpc; run: Run
 
   return (
     <>
-      <Title>Add a plugin</Title>
+      <Title>Add a plugin to {group.name}</Title>
       <div
         onDragOver={(event) => {
           event.preventDefault();
@@ -471,7 +541,7 @@ function AddFromMarketplace({ data, busy, rpc, run }: { data: HubData; busy: str
   const listed = new Set(data.marketplace.map((item) => item.entry));
   return (
     <>
-      <Title>Add from the marketplace</Title>
+      <Title>Add from the marketplace to {data.group.name}</Title>
       <form
         className="flex items-center gap-2"
         onSubmit={(event: FormEvent<HTMLFormElement>) => {
@@ -500,7 +570,7 @@ function AddFromMarketplace({ data, busy, rpc, run }: { data: HubData; busy: str
                     variant="ghost"
                     className="h-6 px-2"
                     disabled={busy !== null || !result.compatible}
-                    onClick={() => void run(`madd:${result.entry}`, () => rpc.call("hub_marketplace_add", { entry: result.entry }))}
+                    onClick={() => void run(`madd:${result.entry}`, () => rpc.call("hub_marketplace_add", { entry: result.entry, group: data.group.id }))}
                   >
                     {busy === `madd:${result.entry}` ? "Adding…" : result.compatible ? "Add" : "Incompatible"}
                   </Button>
@@ -516,19 +586,44 @@ function AddFromMarketplace({ data, busy, rpc, run }: { data: HubData; busy: str
 
 // ---------------------------------------------------------------------------
 
+const GROUP_STORAGE_KEY = "bb-plugin-hub:group";
+
 function HubPage() {
   const rpc = useRpc<typeof rpcContract>();
   const [data, setData] = useState<HubData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // The selected group is remembered per browser.
+  const [group, setGroup] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem(GROUP_STORAGE_KEY) ?? "home";
+    } catch {
+      return "home";
+    }
+  });
+  const selectGroup = (next: string) => {
+    setGroup(next);
+    try {
+      window.localStorage.setItem(GROUP_STORAGE_KEY, next);
+    } catch {
+      // storage unavailable: the choice lasts until the page reloads
+    }
+  };
 
   const report = useCallback((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)), []);
   const refetch = useCallback(() => {
-    rpc.call("hub_list").then((result) => {
-      setData(result);
-      setError(null);
-    }, report);
-  }, [rpc, report]);
+    rpc.call("hub_list", { group }).then(
+      (result) => {
+        setData(result);
+        setError(null);
+      },
+      (cause: unknown) => {
+        // A remembered group that no longer exists falls back to home.
+        if (group !== "home" && String(cause).includes("no group")) selectGroup("home");
+        else report(cause);
+      },
+    );
+  }, [rpc, report, group]);
   useEffect(() => {
     refetch();
   }, [refetch]);
@@ -559,10 +654,11 @@ function HubPage() {
           <p className="mt-4 text-sm text-muted-foreground">Loading…</p>
         ) : (
           <>
+            <GroupSelector data={data} selected={data.group.id} onSelect={selectGroup} busy={busy} rpc={rpc} run={run} />
             <Plugins data={data} busy={busy} rpc={rpc} run={run} />
             <MarketplacePlugins data={data} busy={busy} rpc={rpc} run={run} />
             <SyncLine data={data} busy={busy} rpc={rpc} run={run} />
-            <AddPlugin busy={busy} rpc={rpc} run={run} />
+            <AddPlugin busy={busy} rpc={rpc} run={run} group={data.group} />
             <AddFromMarketplace data={data} busy={busy} rpc={rpc} run={run} />
           </>
         )}

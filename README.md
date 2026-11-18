@@ -12,6 +12,14 @@ installs them and keeps them up to date on every member's machine.
 The repository is public, so nothing needs a GitHub token.
 
 - **Join:** see [JOIN.md](JOIN.md). It's one command.
+- **Groups:** the repository root is the **Home** group, which everyone gets.
+  [`groups/lean-software-developers`](groups/lean-software-developers) and
+  [`groups/lean-software-student`](groups/lean-software-student) are extra
+  groups with the same layout (their own `packages.json`, `plugins/`, and
+  `marketplace.json`). Each machine subscribes to any number of them
+  (`bb hub group subscribe <id>`, or the selector at the top of the Plugin hub
+  page). When a plugin id is in several subscribed groups, the newest version
+  wins.
 - **Browse in bb:** the repository is also a bb plugin marketplace,
   [`marketplace.json`](marketplace.json) ("Team plugins"). The hub adds it to
   **Settings → Plugin marketplaces** on every member's machine, so the plugins
