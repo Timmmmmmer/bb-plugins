@@ -186,18 +186,24 @@ group's own folders.
 ### Moving between groups
 
 ```sh
-bb hub plugin move <folder|repo> --to <group> [--from <group>] [--path <folder>] [--yes]
+bb hub plugin move <folder|name|repo> --to <group> [--from <group>] [--path <folder>]
 bb hub marketplace move <id>[@<marketplace>] --to <group> [--from <group>]
 ```
 
-One commit moves the plugin, and the page's ⇄ button does the same. A
-**local** plugin's folder moves (`git mv`), so it needs `--yes`: every hub that
-still gets the plugin finds that its installed folder no longer exists and
-reinstalls it from the new folder, which resets its settings and data. This
-is the only case where the hub switches folders by itself. A clash where both
-folders still exist is never switched automatically. **Remote** and
-**marketplace** moves only move the packages.json entry, with no reinstall and
-no data loss. In every case, machines subscribed only to the old group keep
-the plugin unmanaged. A moved-in plugin id leaves the destination group's
-`uninstall` list. The hub itself can't be moved. Confirm with the user before
-moving a local plugin.
+One commit moves the plugin, and the page's ⇄ button does the same. **Nothing
+is reinstalled and no data is lost**, for every kind of plugin:
+- **local:** the folder stays put. The new group lists it in its
+  packages.json `"local": [{ "path": "<folder from repo root>" }]`, and the old
+  group stops listing it: an `"exclude"` entry if the folder is in its own
+  `plugins/`, otherwise it leaves its `"local"` list. Moving it back to the
+  group whose `plugins/` holds it just removes the exclude. Installed copies
+  keep their folder, so they don't change.
+- **remote / marketplace:** the packages.json entry moves.
+
+Machines subscribed only to the old group keep the plugin, but it stops
+updating. A moved-in id leaves the destination's `uninstall` list. The hub
+can't be moved. Deleting a moved plugin (from its owning group) removes the
+folder, and hubs uninstall a deleted plugin only when the exact folder they
+installed it from is gone from the repository. If a folder is ever moved by
+hand (`git mv`), hubs reinstall from the new folder, which resets that
+plugin's data.

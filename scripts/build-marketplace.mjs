@@ -120,6 +120,21 @@ async function buildGroup(group) {
     }
   }
 
+  // Local plugins moved here from another group: their folder stays where it
+  // is ("local" entries, paths from the repository root).
+  for (const entry of packages.local ?? []) {
+    const folder = String(entry.path ?? "").replace(/^\/+|\/+$/gu, "");
+    const manifestFile = path.join(ROOT, folder, "package.json");
+    if (!folder || !existsSync(manifestFile)) {
+      console.warn(`[${group.id}] skipped local ${folder}: no package.json`);
+      continue;
+    }
+    const manifest = readJson(manifestFile);
+    if (typeof manifest.bb !== "object" || manifest.bb === null) continue;
+    const relative = path.posix.relative(group.path || ".", folder);
+    add(entryFor(manifest, { url: repoUrl, subdir: folder, ref: branch, owner: repo.owner, iconBase: relative.startsWith("..") ? null : `./${relative}` }), folder);
+  }
+
   // Remote plugins on GitHub: read their package.json from the repository.
   for (const remote of [...(packages.remote ?? []), ...(packages.plugins ?? [])]) {
     const match = String(remote.repo ?? "").match(/^(?:https:\/\/github\.com\/)?([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/u);

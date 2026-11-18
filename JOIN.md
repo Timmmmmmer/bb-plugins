@@ -55,16 +55,16 @@ resets its data). `bb hub adopt <folder>` switches when you're ready.
 Use the ⇄ button on a plugin's row (it asks which group), or:
 
 ```sh
-bb hub plugin move hello --to lean-software-developers --yes        # a local plugin (folder)
+bb hub plugin move hello --to lean-software-developers              # a local plugin
 bb hub plugin move someone/bb-plugin-x --from home --to lean-software-student   # a remote plugin
 bb hub marketplace move bb-sidebar@bb-community --to lean-software-student
 ```
 
 - **Remote and marketplace plugins:** only their entry moves. Nothing is
   reinstalled and no data is lost.
-- **Local plugins:** the folder moves, so every machine that still gets the
-  plugin reinstalls it from the new folder at its next sync, which **resets
-  its settings and data**. That's why the page and `--yes` ask first.
+- **Local plugins:** the new group takes the plugin over, but its folder stays
+  where it is (the new group lists it under `"local"`, the old group under
+  `"exclude"`). Nothing is reinstalled and no data is lost.
 - Machines subscribed only to the old group keep the plugin, but it stops
   updating.
 

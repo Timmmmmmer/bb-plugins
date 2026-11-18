@@ -251,7 +251,7 @@ function MoveButton({ name, busy, onClick, disabled }: { name: string; busy: str
   );
 }
 
-/** "Move to group": local plugins warn that every copy is reinstalled (data reset). */
+/** "Move to group": nothing is reinstalled for any kind of plugin. */
 function MoveDialog({
   target,
   data,
@@ -281,9 +281,8 @@ function MoveDialog({
           <DialogDescription>
             {target?.kind === "local" ? (
               <>
-                Its folder moves from {data.group.name} to the group you pick. <strong>Every machine that still gets it
-                reinstalls it from the new folder at the next sync, which resets its settings and data.</strong> Machines
-                subscribed only to {data.group.name} keep their copy, but it stops updating.
+                The group you pick takes it over; its folder stays where it is, so nothing is reinstalled and no data is
+                lost. Machines subscribed only to {data.group.name} keep it, but it stops updating.
               </>
             ) : (
               <>
@@ -310,7 +309,7 @@ function MoveDialog({
             Cancel
           </Button>
           <Button
-            variant={target?.kind === "local" ? "destructive" : "default"}
+            variant="default"
             disabled={busy !== null || to === "" || target === null}
             onClick={() => {
               const move = target;
@@ -322,7 +321,7 @@ function MoveDialog({
               }
             }}
           >
-            {target?.kind === "local" ? `Move to ${toName} and reinstall` : `Move to ${toName}`}
+            {`Move to ${toName}`}
           </Button>
         </DialogFooter>
       </DialogContent>

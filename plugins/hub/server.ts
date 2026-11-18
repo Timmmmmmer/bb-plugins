@@ -90,6 +90,13 @@ const packagesFileSchema = z.object({
    * plugin is deleted; an id leaves the list when a plugin with it is added again.
    */
   uninstall: z.array(z.string().trim().min(1)).max(200).optional(),
+  /**
+   * Local plugin folders elsewhere in this repository that this group owns,
+   * e.g. a plugin moved here from another group (its folder stays put, so
+   * installed copies keep their data). The group whose plugins/ holds the
+   * folder lists it in "exclude".
+   */
+  local: z.array(z.object({ path: z.string().trim().min(1) })).max(200).optional(),
   /** Older name for "remote"; still read. */
   plugins: z.array(packageEntrySchema).max(100).optional(),
   /** Remote plugins: other public repositories, installed straight from there. */
@@ -684,6 +691,18 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
     }
+    for (const entry of file.local ?? []) {
+      const folder = entry.path.replace(/^\/+|\/+$/gu, "");
+      if (!PATH_PATTERN.test(folder) || folder === hubPath) {
+        errors.push(`Invalid local entry "${entry.path}".`);
+        continue;
+      }
+      const key = `${repoKey(packagesRepo)}|${folder}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        specs.push({ ...packagesRepo, path: folder, ref: null, group: group.id });
+      }
+    }
     for (const entry of [...(file.remote ?? []), ...(file.plugins ?? [])]) {
       try {
         const repo = entry.repo === undefined ? packagesRepo : parseRepo(entry.repo);
@@ -749,10 +768,26 @@ export default async function plugin(bb: BbPluginApi) {
     const match = plugin.rootDir.split(path.sep).join("/").match(/\/[0-9a-f]{40}(?:\/(.+))?$/u);
     return match ? (match[1] ?? "") : null;
   }
-  /** Which group a folder of the shared repository belongs to. */
+  /** Which group's area (plugins/ folder) a folder of the shared repository is in. */
   function groupOfFolder(folder: string, groups: Group[]): string {
     const owner = groups.filter((group) => group.path !== "" && (folder === group.path || folder.startsWith(`${group.path}/`)));
     return owner.sort((a, b) => b.path.length - a.path.length)[0]?.id ?? HOME_GROUP;
+  }
+
+  /**
+   * Which group owns a local plugin folder, reading packages.json files in a
+   * working clone: a group that lists it under "local" (it was moved there),
+   * otherwise the group whose area holds it.
+   */
+  async function folderOwner(work: string, folder: string, groups: Group[]): Promise<{ owner: Group; area: Group }> {
+    const area = groups.find((group) => group.id === groupOfFolder(folder, groups)) as Group;
+    for (const group of groups) {
+      const document = await readFile(path.join(work, inGroup(group, "packages.json")), "utf8")
+        .then((text) => packagesFileSchema.safeParse(JSON.parse(text)).data)
+        .catch(() => undefined);
+      if (document?.local?.some((entry) => entry.path.replace(/^\/+|\/+$/gu, "") === folder)) return { owner: group, area };
+    }
+    return { owner: area, area };
   }
 
   async function installOrUpdate(spec: PackageSpec, label: string): Promise<SyncResult> {
@@ -990,34 +1025,51 @@ export default async function plugin(bb: BbPluginApi) {
     const outcome = await serialize(async () => {
       const { packagesRepo, hubPath } = await readConfig();
       const allGroups = await listGroups();
-      // A full path names its group; a bare name is in the given group (default home).
-      const group = arg.includes("/")
-        ? (allGroups.find((candidate) => candidate.id === groupOfFolder(arg.replace(/^\/+|\/+$/gu, ""), allGroups)) as Group)
-        : await findGroup(groupId);
-      const pluginsDir = inGroup(group, PLUGINS_FOLDER);
-      const folder = (arg.includes("/") ? arg : `${pluginsDir}/${arg}`).replace(/^\/+|\/+$/gu, "");
-      if (!folder.startsWith(`${pluginsDir}/`) || folder.slice(pluginsDir.length + 1).includes("/") || !PATH_PATTERN.test(folder)) {
-        throw new Error(`"${arg}" is not a local plugin folder (expected ${pluginsDir}/<name>).`);
-      }
-      if (folder === hubPath) throw new Error("The hub can't delete itself.");
       const work = await workingClone(packagesRepo);
+      const ref = arg.replace(/^\/+|\/+$/gu, "");
+      let folder: string;
+      let group: Group;
+      if (ref.includes("/")) {
+        folder = ref;
+        group = (await folderOwner(work, folder, allGroups)).owner;
+      } else {
+        group = await findGroup(groupId);
+        const groupDoc = await readJsonFile(path.join(work, inGroup(group, "packages.json")));
+        const owned = entries(groupDoc, "local").map((entry) => String(entry.path ?? "").replace(/^\/+|\/+$/gu, ""));
+        folder = owned.find((candidate) => candidate.split("/").at(-1) === ref) ?? `${inGroup(group, PLUGINS_FOLDER)}/${ref}`;
+      }
+      if (!PATH_PATTERN.test(folder)) throw new Error(`"${arg}" is not a local plugin folder.`);
+      if (folder === hubPath) throw new Error("The hub can't delete itself.");
       const manifestText = await readFile(path.join(work, folder, "package.json"), "utf8").catch(() => null);
       if (manifestText === null) throw new Error(`${folder} doesn't exist in the shared repository.`);
+      const { owner, area } = await folderOwner(work, folder, allGroups);
+      if (owner.id !== group.id) throw new Error(`${folder} belongs to ${owner.name}, not ${group.name}.`);
       const pluginId = pluginIdForPackageName(packageJsonSchema.parse(JSON.parse(manifestText)).name);
       await rm(path.join(work, folder), { recursive: true, force: true });
-      const packagesRelative = inGroup(group, "packages.json");
-      const file = path.join(work, packagesRelative);
-      const document = z.record(z.string(), z.unknown()).parse(JSON.parse(await readFile(file, "utf8")));
-      const uninstall = z.array(z.string()).catch([]).parse(document.uninstall ?? []);
-      const exclude = z.array(z.string()).catch([]).parse(document.exclude ?? []);
-      const next = {
-        ...document,
-        ...(document.exclude !== undefined ? { exclude: exclude.filter((entry) => inGroup(group, entry.replace(/\/+$/u, "")) !== folder) } : {}),
-        uninstall: [...new Set([...uninstall, pluginId])],
+      const paths = [folder];
+      // The owner: drop the folder from "local" and "exclude", put the id on "uninstall".
+      const ownerFile = path.join(work, inGroup(owner, "packages.json"));
+      const ownerDoc = await readJsonFile(ownerFile);
+      const notThisFolder = (entry: unknown) => inGroup(owner, String(entry).replace(/\/+$/u, "")) !== folder;
+      const next: Record<string, unknown> = {
+        ...ownerDoc,
+        uninstall: [...new Set([...z.array(z.string()).catch([]).parse(ownerDoc.uninstall ?? []), pluginId])],
       };
-      packagesFileSchema.parse(next);
-      await writeFile(file, `${JSON.stringify(next, null, 2)}\n`);
-      const commit = await commitAndPush(work, [folder, packagesRelative], `Delete local plugin ${folder} (${pluginId}) and uninstall it everywhere`, packagesRepo);
+      if (Array.isArray(ownerDoc.exclude)) next.exclude = (ownerDoc.exclude as unknown[]).filter(notThisFolder);
+      if (Array.isArray(ownerDoc.local)) next.local = entries(ownerDoc, "local").filter((entry) => String(entry.path ?? "").replace(/^\/+|\/+$/gu, "") !== folder);
+      await writeJsonFile(ownerFile, next);
+      paths.push(inGroup(owner, "packages.json"));
+      // The area group (if it's another group) listed it in "exclude"; tidy that up.
+      if (area.id !== owner.id) {
+        const areaFile = path.join(work, inGroup(area, "packages.json"));
+        const areaDoc = await readJsonFile(areaFile);
+        if (Array.isArray(areaDoc.exclude)) {
+          areaDoc.exclude = (areaDoc.exclude as unknown[]).filter((entry) => inGroup(area, String(entry).replace(/\/+$/u, "")) !== folder);
+          await writeJsonFile(areaFile, areaDoc);
+          paths.push(inGroup(area, "packages.json"));
+        }
+      }
+      const commit = await commitAndPush(work, paths, `Delete local plugin ${folder} (${pluginId}) and uninstall it everywhere`, packagesRepo);
       bb.log.info(`deleted ${folder} (${pluginId}) as ${commit ?? "?"}`);
       return { folder, pluginId, commit };
     });
@@ -1040,13 +1092,14 @@ export default async function plugin(bb: BbPluginApi) {
     z.array(z.record(z.string(), z.unknown())).catch([]).parse(document[key] ?? []);
 
   /**
-   * Move a plugin from one group to another in one commit.
-   * - local: its folder moves to the other group's plugins/. Every machine that
-   *   still gets it reinstalls it from the new folder at its next sync, which
-   *   resets its settings and data.
-   * - remote / marketplace: only its packages.json entry moves; nothing is
-   *   reinstalled and no data is lost.
-   * Machines subscribed only to the old group keep their copy, but it stops
+   * Move a plugin from one group to another in one commit. Nothing is
+   * reinstalled and no data is lost:
+   * - local: the folder stays where it is; the new group lists it under
+   *   "local", and the old group stops listing it ("exclude" for its own
+   *   area, or off its "local" list). Moving it back to the group whose
+   *   plugins/ holds it just un-excludes it.
+   * - remote / marketplace: the packages.json entry moves.
+   * Machines subscribed only to the old group keep the plugin, but it stops
    * updating (like a removal).
    */
   async function movePlugin(kind: MoveKind, ref: string, fromId: string | undefined, toId: string, options: { path?: string } = {}) {
@@ -1054,50 +1107,64 @@ export default async function plugin(bb: BbPluginApi) {
       const { packagesRepo, hubPath } = await readConfig();
       const allGroups = await listGroups();
       const to = await findGroup(toId);
-      // A local folder path names its own group; otherwise --from (default home).
+      const work = await workingClone(packagesRepo);
       const localRef = ref.replace(/^\/+|\/+$/gu, "");
+      // A local folder path names its own (owning) group; otherwise --from (default home).
       const from =
         kind === "local" && localRef.includes("/")
-          ? (allGroups.find((group) => group.id === groupOfFolder(localRef, allGroups)) as Group)
+          ? (await folderOwner(work, localRef, allGroups)).owner
           : await findGroup(fromId);
       if (from.id === to.id) throw new Error(`It is already in ${to.name}.`);
-      const work = await workingClone(packagesRepo);
-      const fromFile = path.join(work, inGroup(from, "packages.json"));
-      const toFile = path.join(work, inGroup(to, "packages.json"));
-      const fromDoc = await readJsonFile(fromFile);
-      const toDoc = await readJsonFile(toFile);
+      const docs = new Map<string, Record<string, unknown>>();
+      const docOf = async (group: Group) => {
+        const existing = docs.get(group.id);
+        if (existing) return existing;
+        const document = await readJsonFile(path.join(work, inGroup(group, "packages.json")));
+        docs.set(group.id, document);
+        return document;
+      };
+      const fromDoc = await docOf(from);
+      const toDoc = await docOf(to);
       let label: string;
       let pluginId: string | null = null;
-      const paths = [inGroup(from, "packages.json"), inGroup(to, "packages.json")];
 
       if (kind === "local") {
-        const fromPlugins = inGroup(from, PLUGINS_FOLDER);
-        const toPlugins = inGroup(to, PLUGINS_FOLDER);
-        const folder = localRef.includes("/") ? localRef : `${fromPlugins}/${localRef}`;
-        if (!folder.startsWith(`${fromPlugins}/`) || folder.slice(fromPlugins.length + 1).includes("/") || !PATH_PATTERN.test(folder)) {
-          throw new Error(`"${ref}" is not a local plugin folder of ${from.name} (expected ${fromPlugins}/<name>).`);
-        }
+        // Which folder: a path, or a name in the old group (its area or its "local" list).
+        const owned = entries(fromDoc, "local").map((entry) => String(entry.path ?? "").replace(/^\/+|\/+$/gu, ""));
+        const folder = localRef.includes("/")
+          ? localRef
+          : owned.find((candidate) => candidate.split("/").at(-1) === localRef) ?? `${inGroup(from, PLUGINS_FOLDER)}/${localRef}`;
+        if (!PATH_PATTERN.test(folder)) throw new Error(`"${ref}" is not a local plugin folder.`);
         if (folder === hubPath) throw new Error("The hub can't be moved.");
         const manifestText = await readFile(path.join(work, folder, "package.json"), "utf8").catch(() => null);
         if (manifestText === null) throw new Error(`${folder} doesn't exist.`);
+        const { owner, area } = await folderOwner(work, folder, allGroups);
+        if (owner.id !== from.id) throw new Error(`${folder} belongs to ${owner.name}, not ${from.name}.`);
         pluginId = pluginIdForPackageName(packageJsonSchema.parse(JSON.parse(manifestText)).name);
-        const name = folder.slice(fromPlugins.length + 1);
-        const target = `${toPlugins}/${name}`;
-        if (await access(path.join(work, target)).then(() => true, () => false)) throw new Error(`${target} already exists in ${to.name}.`);
-        for (const entry of await readdir(path.join(work, toPlugins), { withFileTypes: true }).catch(() => [])) {
-          if (!entry.isDirectory()) continue;
-          const other = await readFile(path.join(work, toPlugins, entry.name, "package.json"), "utf8")
-            .then((text) => pluginIdForPackageName((JSON.parse(text) as { name?: string }).name ?? ""), () => null);
-          if (other === pluginId) throw new Error(`Plugin id "${pluginId}" is already used by ${toPlugins}/${entry.name} in ${to.name}.`);
+        const sameFolder = (entry: unknown, group: Group) => inGroup(group, String(entry).replace(/\/+$/u, "")) === folder;
+        // The old group stops listing it.
+        if (from.id === area.id) {
+          const exclude = Array.isArray(fromDoc.exclude) ? (fromDoc.exclude as unknown[]) : [];
+          const relative = from.path === "" ? folder : folder.slice(from.path.length + 1);
+          if (!exclude.some((entry) => sameFolder(entry, from))) fromDoc.exclude = [...exclude, relative];
+        } else {
+          fromDoc.local = entries(fromDoc, "local").filter((entry) => String(entry.path ?? "").replace(/^\/+|\/+$/gu, "") !== folder);
         }
-        await mkdir(path.join(work, toPlugins), { recursive: true });
-        await git(["mv", folder, target], work);
-        // Drop it from the old group's exclude list.
-        if (Array.isArray(fromDoc.exclude)) {
-          fromDoc.exclude = (fromDoc.exclude as unknown[]).filter((entry) => inGroup(from, String(entry).replace(/\/+$/u, "")) !== folder);
+        // The new group lists it.
+        if (to.id === area.id) {
+          if (Array.isArray(toDoc.exclude)) toDoc.exclude = (toDoc.exclude as unknown[]).filter((entry) => !sameFolder(entry, to));
+        } else {
+          const local = entries(toDoc, "local");
+          if (!local.some((entry) => String(entry.path ?? "").replace(/^\/+|\/+$/gu, "") === folder)) toDoc.local = [...local, { path: folder }];
+          // And the area group must not list it either.
+          if (area.id !== from.id) {
+            const areaDoc = await docOf(area);
+            const exclude = Array.isArray(areaDoc.exclude) ? (areaDoc.exclude as unknown[]) : [];
+            const relative = area.path === "" ? folder : folder.slice(area.path.length + 1);
+            if (!exclude.some((entry) => sameFolder(entry, area))) areaDoc.exclude = [...exclude, relative];
+          }
         }
-        paths.push(folder, target);
-        label = `${folder} → ${target}`;
+        label = folder;
       } else if (kind === "remote") {
         const parsed = parseRepoInput(ref);
         const folder = (options.path ?? parsed.path ?? "").replace(/^\/+|\/+$/gu, "");
@@ -1131,8 +1198,13 @@ export default async function plugin(bb: BbPluginApi) {
         label = moved.map((item) => `${String(item.id)}@${String(item.marketplace ?? "any")}`).join(", ");
       }
       // A plugin moved in is wanted there: take it off that group's uninstall list.
-      await writeJsonFile(fromFile, fromDoc);
-      await writeJsonFile(toFile, pluginId === null ? toDoc : withoutUninstall(toDoc, pluginId));
+      if (pluginId !== null) docs.set(to.id, withoutUninstall(toDoc, pluginId));
+      const paths: string[] = [];
+      for (const [groupId, document] of docs) {
+        const group = allGroups.find((candidate) => candidate.id === groupId) as Group;
+        await writeJsonFile(path.join(work, inGroup(group, "packages.json")), document);
+        paths.push(inGroup(group, "packages.json"));
+      }
       const commit = await commitAndPush(work, paths, `Move ${kind} plugin ${label} from ${from.name} to ${to.name}`, packagesRepo);
       bb.log.info(`moved ${kind} plugin ${label} from ${from.id} to ${to.id} (${commit ?? "no change"})`);
       return { kind, label, from: from.name, to: to.name, commit };
@@ -1338,8 +1410,10 @@ export default async function plugin(bb: BbPluginApi) {
           if (plugin === undefined) continue;
           const source = plugin.source.toLowerCase();
           if (source !== sharedSource && !source.startsWith(`${sharedSource}@`)) continue;
+          // Only when the folder it was installed from is gone (it was deleted):
+          // a folder that still exists belongs to another group's copy.
           const folder = installedFolder(plugin);
-          if (folder !== null && groupOfFolder(folder, allGroups) !== packages.group.id) continue;
+          if (folder !== null && (await git(["cat-file", "-e", `HEAD:${inFolder(folder, "package.json")}`], packagesDir).then(() => true, () => false))) continue;
           try {
             await bb.sdk.plugins.remove({ pluginId: id });
             bb.log.info(`uninstalled ${id}: it was deleted from group ${packages.group.id}`);
@@ -2319,22 +2393,16 @@ export default async function plugin(bb: BbPluginApi) {
           },
         }),
         "plugin move": cliCommand({
-          summary: "Move a plugin to another group: a local folder (reinstalled everywhere, its data is reset) or a remote plugin's entry (no reinstall)",
+          summary: "Move a local or remote plugin to another group; nothing is reinstalled and no data is lost",
           positionals: [{ name: "plugin", description: 'A local folder ("hello" or "groups/x/plugins/hello") or a remote plugin\'s repo (owner/name or URL)', required: true }],
           options: {
             to: { type: "string", placeholder: "group", required: true, description: "The group to move it to" },
             from: { type: "string", placeholder: "group", description: "The group it is in now (default: home; a full folder path says it)" },
             path: { type: "string", placeholder: "folder", description: "For a remote plugin: only the entry for this folder in its repo" },
-            yes: { type: "boolean", description: "Confirm moving a local plugin: every machine reinstalls it, resetting its settings and data" },
             ...jsonOption,
           },
           async run({ positionals, options }, ctx) {
             const local = !(await isRepoSource(positionals.plugin, ctx.cwd));
-            if (local && !options.yes) {
-              throw new PluginCliError(
-                `Moving a local plugin moves its folder, so every machine that still gets it reinstalls it from the new folder at its next sync, which resets its settings and data. Machines only subscribed to the old group keep their copy, but it stops updating. Re-run with --yes to confirm.`,
-              );
-            }
             const moved = await movePlugin(local ? "local" : "remote", positionals.plugin, options.from, options.to, { path: options.path }).catch((cause) => { throw toCliError(cause); });
             if (options.json) return { exitCode: 0, stdout: JSON.stringify(moved) };
             return {
