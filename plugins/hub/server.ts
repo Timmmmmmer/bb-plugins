@@ -423,7 +423,7 @@ export const rpcContract = defineRpcContract({
       syncing: z.object({ trigger: z.string(), startedAt: z.string() }).nullable(),
       /** The hub is updating itself: applying (the old hub started it) or finishing (the new hub's first sync). */
       updating: z.object({ phase: z.enum(["applying", "finishing"]), to: z.string().nullable() }).nullable(),
-      /** The Publish buttons live in the thread side panel's Publish tab (setting publishInSidePanel). */
+      /** The Publish buttons live only under the sidebar footer's Publish button (setting publishInSidePanel). */
       publishInSidePanel: z.boolean(),
     }),
   },
@@ -594,8 +594,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
     publishInSidePanel: {
       type: "boolean",
-      label: "Publish in the side panel",
-      description: "Show the Publish buttons for the plugins you develop in a Publish tab in the thread side panel, instead of on the Plugin hub page.",
+      label: "Publish only from the sidebar footer",
+      description: "Show the Publish buttons for the plugins you develop only under the Publish button in the left sidebar's footer, not on the Plugin hub page.",
       default: false,
     },
     hubPath: {

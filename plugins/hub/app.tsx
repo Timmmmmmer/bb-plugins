@@ -761,7 +761,7 @@ function SidePanelOption({ on, busy, rpc, run }: { on: boolean; busy: string | n
         disabled={busy !== null}
         onChange={(event) => void run("sidepanel", () => rpc.call("hub_publish_in_side_panel", { on: event.target.checked }))}
       />
-      Publish in the side panel (a Publish tab next to a thread's files and diffs)
+      Publish only from the sidebar footer (the Publish button next to Settings)
     </label>
   );
 }
@@ -790,7 +790,7 @@ function DevPlugins({
     return (
       <>
         <Title>Your local plugins</Title>
-        <Empty>Publishing is in the thread side panel: open a thread and pick its Publish tab.</Empty>
+        <Empty>Publishing is in the left sidebar: click the Publish button in its footer, next to Settings.</Empty>
         <SidePanelOption on={sidePanel} busy={busy} rpc={rpc} run={run} />
       </>
     );
@@ -1261,7 +1261,7 @@ function HubPage() {
 }
 
 // ---------------------------------------------------------------------------
-// The Publish tab in the thread side panel (option "Publish in the side panel")
+// The Publish button in the sidebar footer (a disclosure above the footer row)
 
 function useSidePanelOption(): boolean {
   const rpc = useRpc<typeof rpcContract>();
@@ -1274,7 +1274,7 @@ function useSidePanelOption(): boolean {
   return on;
 }
 
-function PublishTab() {
+function PublishFooter() {
   const rpc = useRpc<typeof rpcContract>();
   const [data, setData] = useState<HubData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1311,7 +1311,8 @@ function PublishTab() {
     }
   };
   return (
-    <div className="h-full min-h-0 overflow-y-auto px-3 pb-4 pt-2 text-sm">
+    <div className="max-h-[60vh] min-h-0 overflow-y-auto px-3 pb-3 pt-2 text-sm">
+      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Publish your plugins</p>
       {error === null ? null : (
         <p role="alert" className="mb-2 text-sm text-destructive">
           {error}
@@ -1344,15 +1345,12 @@ function PublishTab() {
 }
 
 export default definePluginApp((app) => {
-  app.slots.experimental_tab({
+  app.experimental_sidebarFooter.register({
+    kind: "disclosure",
     id: "publish",
-    title: "Publish",
+    label: "Publish your plugins (Plugin hub)",
     icon: "Upload",
-    tooltip: "Publish the plugins you develop (Plugin hub)",
-    context: { kind: "thread" },
-    availability: "fixed",
-    useVisible: () => useSidePanelOption(),
-    component: PublishTab,
+    component: PublishFooter,
   });
   app.slots.navPanel({ id: "plugin-hub", title: "Plugin hub", icon: "Package", path: "plugin-hub", component: HubPage });
 });

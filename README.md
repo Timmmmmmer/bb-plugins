@@ -77,9 +77,10 @@ Best for team plugins that live in this repository.
    Or use **Publish** under **Your local plugins** on the Plugin hub page
    (every plugin you run from your own folder is listed there; you can also
    start developing one there by entering its folder and clicking
-   **Develop**, which is `bb hub dev <folder>`). Prefer it next to your work?
-   Tick **Publish in the side panel** and the buttons move to a **Publish** tab
-   in the thread side panel. It copies the
+   **Develop**, which is `bb hub dev <folder>`). The same controls are always one
+   click away under the **Publish** button in the left sidebar's footer (next
+   to Settings; it works with BB Sidebar too). Tick **Publish only from the
+   sidebar footer** to take them off this page. It copies the
    folder into the group's `plugins/<name>` and pushes. It refuses unless
    `version` in `package.json` is newer than the published copy, and lists
    what changed. Every hub in the group gets it at the next sync (within 15

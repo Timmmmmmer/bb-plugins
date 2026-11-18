@@ -230,9 +230,10 @@ stable, another group's) moves the plugin and keeps its settings and data.
 Plugins installed from git before that keep their git install; joining a beta
 for one needs `--reset-data` (one reinstall, data reset). Plugins a machine
 runs from its own folder (`bb plugin install .`) are left alone and listed on
-the page under **Your local plugins** with Publish buttons. With the setting
-`publishInSidePanel` (the page's "Publish in the side panel" checkbox) those
-buttons move to a **Publish** tab in the thread side panel.
+the page under **Your local plugins** with Publish buttons, and under the
+**Publish** button in the left sidebar's footer. With the setting
+`publishInSidePanel` (the "Publish only from the sidebar footer" checkbox)
+the page shows only a pointer to that footer button.
 
 ### Moving between groups
 
