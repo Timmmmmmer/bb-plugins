@@ -21,6 +21,11 @@
       "id": "ensembleworks",
       "name": "ensembleWorks",
       "path": "groups/ensembleworks"
+    },
+    {
+      "id": "hub-test",
+      "name": "Hub Test",
+      "path": "groups/hub-test"
     }
   ],
   "syncIntervalMinutes": 15,
