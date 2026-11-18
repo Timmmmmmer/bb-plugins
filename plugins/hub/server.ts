@@ -2456,7 +2456,7 @@ export default async function plugin(bb: BbPluginApi) {
         // A repository with several plugins (its root isn't one): follow it,
         // so every plugin in it (or the one folder given) is built from a
         // checkout of the whole repository, sibling packages included.
-        if (!(await isPluginDir(clone))) return addFollow(clone, parsed.repo, parsed.ref, subdir, options.group);
+        if (!(await isPluginDir(clone))) return await addFollow(clone, parsed.repo, parsed.ref, subdir, options.group);
         const pluginDir = await findPluginDir(clone, subdir);
         const { pluginId, warning } = await checkManifest(pluginDir);
         if (pluginId === bb.pluginId) throw new Error("That is the hub itself.");
