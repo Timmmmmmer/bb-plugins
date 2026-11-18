@@ -16,6 +16,11 @@
       "id": "mrdavidlaing",
       "name": "mrdavidlaing",
       "path": "groups/mrdavidlaing"
+    },
+    {
+      "id": "ensembleworks",
+      "name": "ensembleWorks",
+      "path": "groups/ensembleworks"
     }
   ],
   "syncIntervalMinutes": 15,
