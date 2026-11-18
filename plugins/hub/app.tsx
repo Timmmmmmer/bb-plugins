@@ -7,7 +7,7 @@ import type { DragEvent, FormEvent, ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { PackageView, PluginFolder, rpcContract, Schedule, SyncReport, SyncResult } from "./server";
 import { Button } from "@/components/ui/button";
-import { Icon } from "@/components/ui/icon";
+import { Glyph } from "@/components/glyph";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
@@ -94,7 +94,7 @@ function Row({
               aria-expanded={open}
               onClick={() => setOpen((value) => !value)}
             >
-              <Icon name={open ? "ChevronUp" : "Info"} className="size-3.5" />
+              <Glyph name={open ? "ChevronUp" : "Info"} className="size-3.5" />
             </Button>
           )}
         </span>
@@ -122,7 +122,7 @@ function InfoLines({ description, lines, link }: { description: string | null; l
       </dl>
       {link === null ? null : (
         <a href={link} target="_blank" rel="noreferrer" className="mt-1.5 inline-flex items-center gap-1 text-foreground underline underline-offset-2">
-          <Icon name="ExternalLink" className="size-3" />
+          <Glyph name="ExternalLink" className="size-3" />
           View source
         </a>
       )}
@@ -191,7 +191,7 @@ function GroupSelector({
   return (
     <div className="mt-3">
       <div className="flex items-center gap-2">
-        <Icon name="Layers" className="size-4 shrink-0 text-muted-foreground" />
+        <Glyph name="Layers" className="size-4 shrink-0 text-muted-foreground" />
         <select
           value={current?.id}
           onChange={(event) => onSelect(event.target.value)}
@@ -238,6 +238,7 @@ type MoveTarget = { kind: "local" | "remote" | "marketplace"; ref: string; path?
 
 function MoveButton({ name, busy, onClick, disabled }: { name: string; busy: string | null; onClick: () => void; disabled?: boolean }) {
   return (
+    <span title="Move to another group" className="inline-flex">
     <Button
       variant="ghost"
       size="icon"
@@ -246,8 +247,9 @@ function MoveButton({ name, busy, onClick, disabled }: { name: string; busy: str
       disabled={busy !== null || disabled}
       onClick={onClick}
     >
-      <Icon name="ArrowLeftRight" className="size-3.5" />
+      <Glyph name="ArrowLeftRight" className="size-3.5" />
     </Button>
+    </span>
   );
 }
 
@@ -351,7 +353,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
               details={<Details entry={entry} result={resultFor(entry.label)} />}
               icon={
                 <span title={entry.kind === "remote" ? "remote plugin" : "local plugin"} className="shrink-0 text-muted-foreground">
-                  <Icon name={entry.kind === "remote" ? "Link" : "Folder"} className="size-3.5" />
+                  <Glyph name={entry.kind === "remote" ? "Link" : "Folder"} className="size-3.5" />
                 </span>
               }
               action={
@@ -382,7 +384,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
                       )
                     }
                   >
-                    <Icon name="X" className="size-3.5" />
+                    <Glyph name="X" className="size-3.5" />
                   </Button>
                 ) : (
                   <Button
@@ -393,7 +395,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
                     disabled={busy !== null}
                     onClick={() => setConfirm(entry)}
                   >
-                    <Icon name="Trash2" className="size-3.5" />
+                    <Glyph name="Trash2" className="size-3.5" />
                   </Button>
                 )}
                 </>
@@ -469,7 +471,7 @@ function MarketplacePlugins({ data, busy, rpc, run }: { data: HubData; busy: str
                     disabled={busy !== null}
                     onClick={() => void run(`mremove:${item.entry}`, () => rpc.call("hub_marketplace_remove", { entry: item.entry, group: data.group.id }))}
                   >
-                    <Icon name="X" className="size-3.5" />
+                    <Glyph name="X" className="size-3.5" />
                   </Button>
                 </>
               }
@@ -497,13 +499,13 @@ function SyncLine({ data, busy, rpc, run }: { data: HubData; busy: string | null
   return (
     <div className="mt-5">
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
-      <Icon name="Clock" className="size-3.5 shrink-0" />
+      <Glyph name="Clock" className="size-3.5 shrink-0" />
       <span className="min-w-0 flex-1">
         Next sync <strong className="text-foreground">{time(by)}</strong> (every {data.schedule.intervalMinutes} min, same time for everyone)
         {self !== null && PROBLEM.includes(self.outcome) ? <span className="text-destructive"> · hub: {self.outcome}</span> : null}
       </span>
       <Button variant="ghost" size="sm" className="h-7 px-2" disabled={busy !== null} onClick={() => void run("sync", () => rpc.call("hub_sync"))}>
-        <Icon name="RefreshCw" className={cn("size-3.5", busy === "sync" && "animate-spin")} />
+        <Glyph name="RefreshCw" className={cn("size-3.5", busy === "sync" && "animate-spin")} />
         Sync now
       </Button>
     </div>
@@ -631,7 +633,7 @@ function AddPlugin({ busy, rpc, run, group }: { busy: string | null; rpc: Rpc; r
             {busy === "add" ? "Adding…" : "Add"}
           </Button>
           <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0" aria-label="Choose a .zip" onClick={() => picker.current?.click()}>
-            <Icon name="Paperclip" className="size-4" />
+            <Glyph name="Paperclip" className="size-4" />
           </Button>
           <input
             ref={picker}
