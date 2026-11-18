@@ -1,6 +1,6 @@
 {
-  "$comment": "The Lean Software Student group. Same format as the root packages.json: include/exclude are relative to this folder, and local plugins go in ./plugins/<name>. Machines that run `bb hub group subscribe lean-software-student` install these.",
-  "name": "Lean Software Student",
+  "$comment": "The Lean Software Student Course 1 group. Same format as the root packages.json: include/exclude are relative to this folder, and local plugins go in ./plugins/<name>. Machines that run `bb hub group subscribe lean-software-student` install these.",
+  "name": "Lean Software Student Course 1",
   "include": [
     "plugins/*"
   ],
