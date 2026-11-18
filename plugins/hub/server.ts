@@ -269,6 +269,8 @@ const syncResultSchema = z.object({
   outcome: z.enum(["installed", "installing", "updated", "current", "pinned", "skipped", "other-source", "updating", "removed", "failed"]),
   detail: z.string().nullable(),
   version: z.string().nullable(),
+  /** The group that lists it (filled in at the end of a sync). */
+  group: z.string().nullable().optional(),
 });
 export type SyncResult = z.infer<typeof syncResultSchema>;
 
@@ -370,7 +372,15 @@ export const rpcContract = defineRpcContract({
     output: z.object({
       repo: z.string(),
       group: z.object({ id: z.string(), name: z.string(), path: z.string() }),
-      groups: z.array(z.object({ id: z.string(), name: z.string(), path: z.string(), subscribed: z.boolean(), home: z.boolean() })),
+      groups: z.array(z.object({
+        id: z.string(),
+        name: z.string(),
+        path: z.string(),
+        subscribed: z.boolean(),
+        home: z.boolean(),
+        /** From this machine's last sync: error (something failed), warning (installed from another source), or ok. */
+        status: z.enum(["ok", "warning", "error"]),
+      })),
       folders: z.array(folderSchema),
       packages: z.array(packageViewSchema),
       marketplace: z.array(z.object({
@@ -2215,6 +2225,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function runSyncSteps(trigger: string): Promise<SyncReport> {
     const startedAt = Date.now();
+    /** Result label → the group that lists it, to tag results with their group. */
+    const labelGroup = new Map<string, string>();
     fetchedThisRound.clear();
     preparedThisRound.clear();
     const results: SyncResult[] = [];
@@ -2241,6 +2253,11 @@ export default async function plugin(bb: BbPluginApi) {
         if (marketplaceResult !== null) results.push(marketplaceResult);
       }
       from = loaded.map((packages) => packages.from).join(", ");
+      for (const packages of loaded) {
+        labelGroup.set(`${packages.group.id}: packages.json`, packages.group.id);
+        for (const spec of [...packages.specs, ...packages.betas]) if (!labelGroup.has(labelFor(spec, packagesRepo))) labelGroup.set(labelFor(spec, packagesRepo), packages.group.id);
+        for (const entry of packages.marketplace) if (!labelGroup.has(marketplaceLabel(entry))) labelGroup.set(marketplaceLabel(entry), packages.group.id);
+      }
       for (const packages of loaded) {
         for (const error of packages.errors) {
           results.push({ repo: `${packages.group.id}: packages.json`, pluginId: null, outcome: "failed", detail: error, version: null });
@@ -2365,6 +2382,7 @@ export default async function plugin(bb: BbPluginApi) {
         results.push({ repo: "hub (self)", pluginId: bb.pluginId, outcome: "failed", detail: errorMessage(cause), version: null });
       }
     }
+    for (const result of results) result.group ??= labelGroup.get(result.repo) ?? null;
     const report: SyncReport = { at: new Date().toISOString(), trigger, packagesFrom: from, durationMs: Date.now() - startedAt, results };
     await bb.storage.kv.set(LAST_SYNC_KEY, report);
     for (const result of results) {
@@ -2486,11 +2504,15 @@ export default async function plugin(bb: BbPluginApi) {
       return loadPackages(groupId);
     });
     const { subscribed } = await readConfig();
-    const groups = (await listGroups()).map((group) => ({
-      ...group,
-      subscribed: group.id === HOME_GROUP || subscribed.includes(group.id),
-      home: group.id === HOME_GROUP,
-    }));
+    const lastResults = (await bb.storage.kv.get<SyncReport>(LAST_SYNC_KEY))?.results ?? [];
+    const statusOf = (groupId: string): "ok" | "warning" | "error" => {
+      const mine = lastResults.filter((result) => result.group === groupId);
+      return mine.some((result) => result.outcome === "failed") ? "error" : mine.some((result) => result.outcome === "other-source") ? "warning" : "ok";
+    };
+    const groups = (await listGroups()).map((group) => {
+      const on = group.id === HOME_GROUP || subscribed.includes(group.id);
+      return { ...group, subscribed: on, home: group.id === HOME_GROUP, status: on ? statusOf(group.id) : ("ok" as const) };
+    });
     const pluginsDir = inGroup(packages.group, PLUGINS_FOLDER);
     const dir = await syncMirror(packages.packagesRepo);
     const tree = await git(["ls-tree", "-d", "--name-only", `HEAD:${pluginsDir}`], dir).catch(() => "");

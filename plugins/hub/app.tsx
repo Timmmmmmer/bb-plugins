@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
 
 type Rpc = ReturnType<typeof useRpc<typeof rpcContract>>;
 type Run = (key: string, action: () => Promise<unknown>) => Promise<void>;
-type GroupView = { id: string; name: string; path: string; subscribed: boolean; home: boolean };
+type GroupView = { id: string; name: string; path: string; subscribed: boolean; home: boolean; status: "ok" | "warning" | "error" };
 type HubData = {
   repo: string;
   group: { id: string; name: string; path: string };
@@ -62,6 +62,11 @@ function Spinner({ children }: { children: ReactNode }) {
 }
 
 const PROBLEM: SyncResult["outcome"][] = ["failed", "other-source"];
+/** Red for a failure, orange for a plugin installed from another source. */
+const WARNING_TEXT = "text-orange-500";
+const outcomeClass = (outcome: SyncResult["outcome"] | null) =>
+  outcome === "failed" ? "text-destructive" : outcome === "other-source" ? WARNING_TEXT : "text-muted-foreground";
+const groupClass = (status: GroupView["status"] | undefined) => (status === "error" ? "text-destructive" : status === "warning" ? WARNING_TEXT : undefined);
 const isSubscribed = (data: HubData) => data.groups.find((group) => group.id === data.group.id)?.subscribed ?? true;
 const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
@@ -112,7 +117,7 @@ function Row({
             </Button>
           )}
         </span>
-        <span className={cn("shrink-0 text-xs", result !== null && PROBLEM.includes(result.outcome) ? "text-destructive" : "text-muted-foreground")}>
+        <span className={cn("shrink-0 text-xs", outcomeClass(result?.outcome ?? null))}>
           {status}
         </span>
         {action}
@@ -253,10 +258,11 @@ function GroupSelector({
           value={current?.id}
           onChange={(event) => onSelect(event.target.value)}
           aria-label="Group"
-          className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm"
+          title={current?.status === "error" ? "Something in this group failed to install or update" : current?.status === "warning" ? "A plugin in this group is installed from another source" : undefined}
+          className={cn("h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm", groupClass(current?.status))}
         >
           {data.groups.map((group) => (
-            <option key={group.id} value={group.id}>
+            <option key={group.id} value={group.id} className={groupClass(group.status) ?? "text-foreground"}>
               {group.name}
               {group.home ? " (home)" : group.subscribed ? " ✓" : ""}
             </option>
@@ -634,7 +640,7 @@ function SyncLine({ data, busy, rpc, run, syncing }: { data: HubData; busy: stri
       <span className="min-w-0 flex-1">
         {syncing !== null ? <strong className="text-foreground">Syncing now… </strong> : null}
         Next sync <strong className="text-foreground">{time(by)}</strong> (every {data.schedule.intervalMinutes} min, same time for everyone)
-        {self !== null && PROBLEM.includes(self.outcome) ? <span className="text-destructive"> · hub: {self.outcome}</span> : null}
+        {self !== null && PROBLEM.includes(self.outcome) ? <span className={outcomeClass(self.outcome)}> · hub: {self.outcome}</span> : null}
       </span>
       <Button variant="ghost" size="sm" className="h-7 px-2" disabled={busy !== null || syncing !== null} onClick={() => void run("sync", () => rpc.call("hub_sync"))}>
         <Glyph name="RefreshCw" className={cn("size-3.5", (busy === "sync" || syncing !== null) && "animate-spin")} />
