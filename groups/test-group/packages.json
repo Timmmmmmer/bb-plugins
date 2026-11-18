@@ -6,8 +6,6 @@
   ],
   "exclude": [],
   "remote": [],
-  "uninstall": [
-    "hub-test"
-  ],
+  "uninstall": [],
   "marketplace": []
 }
