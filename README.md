@@ -54,3 +54,57 @@ The repository is public, so nothing needs a GitHub token.
   repository for a remote plugin). Every running hub picks it up at the next
   shared sync (every 15 minutes, at `:00`, `:15`, `:30`, `:45` UTC). Only
   plugins whose folder changed are updated.
+
+## Developing a plugin and releasing it when it's ready
+
+Members only get what's in this repository (or the branch or tag it points
+to). So develop somewhere else and publish when you choose.
+
+### Option 1: develop locally, copy it in when it's stable
+
+Best for team plugins that live in this repository.
+
+1. **Develop on your own machine only.** Nobody else sees it.
+   ```sh
+   cd ~/code/my-plugin
+   bb plugin install .     # registers the folder in place, on this machine only
+   bb plugin dev           # rebuilds and reloads on every save
+   ```
+2. **First release to everyone:**
+   ```sh
+   bb hub plugin add ~/code/my-plugin            # copies it into plugins/my-plugin and pushes
+   ```
+   Or drop the folder on the Plugin hub page. Every hub installs it at the
+   next sync (within 15 minutes).
+3. **Keep developing** in `~/code/my-plugin`. Your machine keeps running your
+   local copy (the hub leaves it alone and shows it as installed from another
+   source); everyone else stays on the released copy.
+4. **Release again when it's stable.** Bump `version` in `package.json`, then:
+   ```sh
+   bb hub plugin add ~/code/my-plugin --force    # replaces plugins/my-plugin and pushes
+   ```
+   Every hub updates it at the next sync and keeps its settings and data.
+
+### Option 2: its own public repository, released by branch or tag
+
+Best when the plugin is bigger or already has its own repository. Develop on
+`main`, and point the group at a release instead of `main` with a `ref` on the
+remote entry in `packages.json`:
+
+- **A `stable` branch:** `"remote": [{ "repo": "you/bb-plugin-x", "ref": "stable" }]`.
+  Releasing means merging `main` into `stable`. Adding a GitHub link such as
+  `https://github.com/you/bb-plugin-x/tree/stable` sets the branch for you.
+- **Version tags:** `"ref": "semver:^1.0.0"`. Releasing means tagging
+  `v1.1.0`; hubs move up to the newest matching tag.
+
+A followed repository (one with several plugins) works the same way: give its
+`follow` entry a `ref`. Without one it follows the default branch, so every
+commit to `main` reaches everyone.
+
+### Testing with a few people first
+
+Use a group as a beta channel: put the newer version in a group only the
+testers subscribe to. When the same plugin is in two subscribed groups, the
+newest version wins. One catch: a machine that already has the plugin from one
+group doesn't switch to another group's copy by itself, because switching
+reinstalls it and resets its data. Testers run `bb hub adopt <folder>` once.
