@@ -124,16 +124,23 @@ in `bb hub sync`.
   doesn't exist". SSH URLs are refused; use https. A GitHub folder link
   (`https://github.com/o/r/tree/main/plugins/x`) gives the path and branch.
   The older `"plugins"` key is still read as remote entries.
-- **A repository with several plugins and its own `marketplace.json`**
-  (bb marketplace format, at its root or in the folder given): `bb hub plugin
-  add <repo>` registers that marketplace with bb and adds **every plugin it
-  lists** as marketplace entries (`{ "id", "marketplace": "<its name>",
-  "source": "git:<repo url>", "subdirectory"? }`), so bb installs them from
-  their released tags, the way its own marketplace does; other hubs register
-  the marketplace at their next sync. Adding one plugin folder of such a repo
-  uses the marketplace when it lists that folder (`source.git.subdir`), and
-  otherwise falls back to a remote entry with a note. Plugins added to the
-  marketplace later are not picked up automatically; add the repo again.
+- **Followed repositories** (`"follow"`: `{ "repo", "ref"?, "include"?:
+  [folders], "exclude"?: [folders] }`): `bb hub plugin add <repo>` on a
+  repository whose root isn't a plugin follows it. Every folder with a bb
+  plugin in it is installed, found again at each sync (new plugins are picked
+  up; `include` limits it to some folders, `exclude` leaves some out). Each
+  hub keeps a checkout of the whole repository (`follow/` next to its
+  mirrors), installs the root workspace dependencies with the repository's
+  own package manager (bun for `bun.lock`, fetched as `@oven/bun-*` from npm
+  if it isn't on PATH; pnpm, yarn, or npm otherwise; lifecycle scripts off),
+  then each plugin's own dependencies and those of sibling packages it uses
+  (`file:`/`link:` or workspace packages), and installs the plugin from that
+  folder, so bb builds it there with its sibling packages. A new commit that
+  touches the plugin, a sibling package it uses, or the root dependency files
+  rebuilds it in place (settings and data stay). Adding one folder of such a
+  repository adds it to the follow's `include`; `bb hub plugin remove <repo>
+  [--path <folder>]` drops the follow or leaves one folder out. Following
+  replaces `remote` entries for the same repository.
 - `bb hub plugin add` decides by source: a git repository (owner/name, https
   URL; an existing local folder named like owner/name stays a folder) is
   added as a remote entry, with nothing copied. Folders and archives are

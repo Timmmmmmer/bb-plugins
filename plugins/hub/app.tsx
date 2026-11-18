@@ -701,7 +701,7 @@ function AddPlugin({ busy, rpc, run, group }: { busy: string | null; rpc: Rpc; r
       setMessage(
         added.unchanged
           ? `${added.folder} is unchanged.`
-          : `${added.kind === "marketplace" ? "Added from its marketplace:" : added.kind === "remote" ? "Now pointing to" : "Copied in"} ${added.folder}. Everyone has it by ${time(Date.parse(added.guaranteedBy))}.`,
+          : `${added.kind === "followed" ? "Following" : added.kind === "remote" ? "Now pointing to" : "Copied in"} ${added.folder}. Everyone has it by ${time(Date.parse(added.guaranteedBy))}.`,
       );
     });
 

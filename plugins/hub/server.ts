@@ -101,6 +101,19 @@ const packagesFileSchema = z.object({
   plugins: z.array(packageEntrySchema).max(100).optional(),
   /** Remote plugins: other public repositories, installed straight from there. */
   remote: z.array(packageEntrySchema).max(100).optional(),
+  /**
+   * Followed repositories: every bb plugin in another public repository
+   * (found again at each sync, so new ones are picked up), built on each
+   * machine from a checkout of the whole repository with its workspace
+   * dependencies installed, so plugins that use sibling packages build.
+   * include: only these plugin folders; exclude: all but these.
+   */
+  follow: z.array(z.object({
+    repo: z.string().trim().min(1),
+    ref: z.string().trim().min(1).optional(),
+    include: z.array(z.string().trim().min(1)).max(100).optional(),
+    exclude: z.array(z.string().trim().min(1)).max(100).optional(),
+  })).max(50).optional(),
   /** Plugins from bb's marketplaces (bb-community, bb-official, or a third-party one). */
   marketplace: z.array(z.object({
     /** The catalog entry id, as in `bb plugin install <id>@<marketplace>`. */
@@ -147,6 +160,8 @@ interface PackageSpec extends RepoRef {
   ref: string | null;
   /** The group that lists it (filled in by loadPackages). */
   group?: string;
+  /** From a followed repository: built from the hub's checkout, installed from that path. */
+  follow?: boolean;
 }
 
 /** A group of plugins: the repository root (home) or a folder under groups/. */
@@ -436,8 +451,8 @@ export const rpcContract = defineRpcContract({
       commit: z.string().nullable(),
       warning: z.string().nullable(),
       unchanged: z.boolean(),
-      /** marketplace: added from the repository's own marketplace.json (several plugins). */
-      kind: z.enum(["local", "remote", "marketplace"]),
+      /** followed: a repository with several plugins, followed (built from a checkout). */
+      kind: z.enum(["local", "remote", "followed"]),
       guaranteedBy: z.string(),
       sync: syncResultSchema.nullable(),
     }),
@@ -722,6 +737,29 @@ export default async function plugin(bb: BbPluginApi) {
         specs.push({ ...packagesRepo, path: folder, ref: null, group: group.id });
       }
     }
+    for (const entry of file.follow ?? []) {
+      try {
+        const repo = parseRepo(entry.repo);
+        if (repoKey(repo) === repoKey(packagesRepo)) throw new Error("The shared repository can't be followed; its plugins/ folders are local plugins.");
+        if (entry.ref !== undefined && !REF_PATTERN.test(entry.ref)) throw new Error(`Invalid ref "${entry.ref}".`);
+        const clean = (folder: string) => folder.replace(/^\/+|\/+$/gu, "");
+        const include = entry.include?.map(clean);
+        const exclude = new Set((entry.exclude ?? []).map(clean));
+        const folders = (await pluginFoldersAt(await syncMirror(repo), entry.ref ?? "HEAD")).filter(
+          (folder) => (include === undefined || include.includes(folder)) && !exclude.has(folder),
+        );
+        if (folders.length === 0) errors.push(`${repoDisplay(repo)} has no bb plugins to follow.`);
+        for (const folder of folders) {
+          const key = `${repoKey(repo)}|${folder}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            specs.push({ ...repo, path: folder, ref: entry.ref ?? null, group: group.id, follow: true });
+          }
+        }
+      } catch (cause) {
+        errors.push(errorMessage(cause));
+      }
+    }
     for (const entry of [...(file.remote ?? []), ...(file.plugins ?? [])]) {
       try {
         const repo = entry.repo === undefined ? packagesRepo : parseRepo(entry.repo);
@@ -760,7 +798,7 @@ export default async function plugin(bb: BbPluginApi) {
   const labelFor = (spec: PackageSpec, packagesRepo: RepoRef) =>
     isLocal(spec, packagesRepo)
       ? `${spec.path}${spec.ref ? `@${spec.ref}` : ""}`
-      : `${repoDisplay(spec)}${spec.path ? `/${spec.path}` : ""}${spec.ref ? `@${spec.ref}` : ""}`;
+      : `${repoDisplay(spec)}${spec.path ? `/${spec.path}` : ""}${spec.ref ? `@${spec.ref}` : ""}${spec.follow ? " (followed)" : ""}`;
   const sourceFor = (spec: PackageSpec) => `git:${repoUrl(spec)}${spec.ref ? `@${spec.ref}` : ""}`;
   const isHubSource = (installedSource: string, spec: PackageSpec) => {
     const base = `git:${repoUrl(spec)}`.toLowerCase();
@@ -855,6 +893,247 @@ export default async function plugin(bb: BbPluginApi) {
   const stillInstalling = (cause: unknown, repo: string, pluginId: string | null): SyncResult | null =>
     cause instanceof InstallStillRunning ? { repo, pluginId, outcome: "installing", detail: cause.message, version: null } : null;
 
+  // -------------------------------------------------------------------------
+  // Followed repositories: a checkout of the whole repository per machine
+  // (next to the mirrors, in follow/), its workspace dependencies installed
+  // with the repository's own package manager, each plugin's dependencies
+  // installed, then bb installs the plugin from that folder (a path install,
+  // which bb builds). A new commit that touches a plugin, the sibling
+  // packages it uses, or the root dependency files rebuilds it in place
+  // (its settings and data stay).
+
+  const SKIP_DIRS = new Set(["node_modules", "dist", ".git", ".github", "e2e", "spikes", "test", "tests", "fixtures", "examples"]);
+  const FOLLOW_TIMEOUT_MS = 15 * 60_000;
+  const ROOT_FILES = ["package.json", "bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "yarn.lock"];
+
+  /** Every folder of a repository revision that holds a bb plugin (package.json with a "bb" section). */
+  async function pluginFoldersAt(mirror: string, rev: string): Promise<string[]> {
+    const files = (await git(["ls-tree", "-r", "--name-only", rev], mirror)).split("\n").filter((file) => file === "package.json" || file.endsWith("/package.json"));
+    const folders: string[] = [];
+    for (const file of files) {
+      const folder = file === "package.json" ? "" : file.slice(0, -"/package.json".length);
+      const parts = folder === "" ? [] : folder.split("/");
+      if (parts.length > 4 || parts.some((part) => SKIP_DIRS.has(part) || part.startsWith("."))) continue;
+      if (folder !== "" && !PATH_PATTERN.test(folder)) continue;
+      const manifest = await git(["show", `${rev}:${file}`], mirror).then((text) => JSON.parse(text) as { bb?: unknown }, () => null);
+      if (manifest !== null && typeof manifest.bb === "object" && manifest.bb !== null) folders.push(folder);
+      if (folders.length >= 100) break;
+    }
+    return folders;
+  }
+
+  /** Run a program for a followed repository's build; rejects with the tail of its output. */
+  function runTool(command: string, args: string[], cwd: string): Promise<void> {
+    const bin = path.dirname(process.execPath);
+    const env: NodeJS.ProcessEnv = { ...process.env, CI: "1", PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`, npm_config_audit: "false", npm_config_fund: "false" };
+    return new Promise((resolve, reject) => {
+      execFile(command, args, { cwd, env, timeout: FOLLOW_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+        if (error) {
+          const tail = `${String(stderr)}\n${String(stdout)}`.trim().split("\n").filter(Boolean).slice(-4).join(" ").slice(0, 600);
+          reject(new Error(`${path.basename(command)} ${args.join(" ")} failed in ${path.basename(cwd)}: ${tail || error.message}`));
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+
+  /** npm: the one next to bb's node, else the one on PATH. */
+  let npmPath: string | null = null;
+  async function npm(): Promise<string> {
+    if (npmPath !== null) return npmPath;
+    const beside = path.join(path.dirname(process.execPath), process.platform === "win32" ? "npm.cmd" : "npm");
+    npmPath = (await access(beside).then(() => true, () => false)) ? beside : "npm";
+    return npmPath;
+  }
+
+  /** bun: the one on PATH, else bun's own npm package installed into the hub's tools folder. */
+  let bunPath: Promise<string> | null = null;
+  function bun(): Promise<string> {
+    bunPath ??= (async () => {
+      const onPath = await new Promise<boolean>((resolve) => execFile("bun", ["--version"], { timeout: 10_000 }, (error) => resolve(!error)));
+      if (onPath) return "bun";
+      const arch = process.arch === "arm64" ? "aarch64" : "x64";
+      const os = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "darwin" : "linux";
+      const pkg = `@oven/bun-${os}-${arch}`;
+      const tools = path.join(path.dirname(await ensureMirrorRoot()), "tools");
+      const binary = path.join(tools, "node_modules", ...pkg.split("/"), "bin", os === "windows" ? "bun.exe" : "bun");
+      if (!(await access(binary).then(() => true, () => false))) {
+        await mkdir(tools, { recursive: true });
+        await runTool(await npm(), ["install", "--prefix", tools, "--no-save", "--no-package-lock", "--ignore-scripts", `${pkg}@1`], tools);
+        bb.log.info(`installed bun (${pkg}) into ${tools}`);
+      }
+      return binary;
+    })().catch((cause) => {
+      bunPath = null;
+      throw cause;
+    });
+    return bunPath;
+  }
+
+  const exists = (file: string) => access(file).then(() => true, () => false);
+
+  /** Install a folder's dependencies with the package manager its lockfile names (lifecycle scripts off, like bb's own installs). */
+  async function installDependencies(folder: string): Promise<void> {
+    if (await exists(path.join(folder, "bun.lock")) || await exists(path.join(folder, "bun.lockb"))) {
+      await runTool(await bun(), ["install", "--ignore-scripts"], folder);
+    } else if (await exists(path.join(folder, "pnpm-lock.yaml"))) {
+      await runTool(await npm(), ["exec", "--yes", "--", "pnpm@9", "install", "--ignore-scripts", "--frozen-lockfile"], folder);
+    } else if (await exists(path.join(folder, "yarn.lock"))) {
+      await runTool(await npm(), ["exec", "--yes", "--", "yarn@1", "install", "--ignore-scripts", "--frozen-lockfile"], folder);
+    } else if (await exists(path.join(folder, "package-lock.json"))) {
+      await runTool(await npm(), ["ci", "--ignore-scripts"], folder);
+    } else {
+      await runTool(await npm(), ["install", "--ignore-scripts", "--no-package-lock"], folder);
+    }
+  }
+
+  type WorkspaceInfo = { patterns: string[]; byName: Map<string, string> };
+  /** The root package.json "workspaces" (patterns, and package name → folder). */
+  async function readWorkspaces(dir: string): Promise<WorkspaceInfo> {
+    const root = await readFile(path.join(dir, "package.json"), "utf8").then((text) => JSON.parse(text) as { workspaces?: unknown }, () => null);
+    const raw = root?.workspaces;
+    const patterns = (Array.isArray(raw) ? raw : z.object({ packages: z.array(z.string()) }).safeParse(raw).data?.packages ?? [])
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.replace(/^\.\//u, "").replace(/\/+$/u, ""));
+    const byName = new Map<string, string>();
+    for (const pattern of patterns) {
+      const folders = pattern.endsWith("/*")
+        ? (await readdir(path.join(dir, pattern.slice(0, -2)), { withFileTypes: true }).catch(() => [])).filter((entry) => entry.isDirectory()).map((entry) => `${pattern.slice(0, -2)}/${entry.name}`)
+        : [pattern];
+      for (const folder of folders) {
+        const name = await readFile(path.join(dir, folder, "package.json"), "utf8").then((text) => (JSON.parse(text) as { name?: unknown }).name, () => null);
+        if (typeof name === "string") byName.set(name, folder);
+      }
+    }
+    return { patterns, byName };
+  }
+  const inWorkspaces = (folder: string, info: WorkspaceInfo) =>
+    info.patterns.some((pattern) => (pattern.endsWith("/*") ? path.posix.dirname(folder) === pattern.slice(0, -2) : folder === pattern));
+
+  /** A plugin folder plus every sibling package it uses (file:/link: dependencies and workspace packages, transitively). */
+  async function watchedFolders(dir: string, folder: string, info: WorkspaceInfo): Promise<string[]> {
+    const found = new Set<string>([folder]);
+    const queue = [folder];
+    while (queue.length > 0) {
+      const current = queue.shift() as string;
+      const manifest = await readFile(path.join(dir, current, "package.json"), "utf8").then((text) => JSON.parse(text) as Record<string, unknown>, () => null);
+      if (manifest === null) continue;
+      for (const key of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+        for (const [name, spec] of Object.entries(z.record(z.string(), z.string()).catch({}).parse(manifest[key] ?? {}))) {
+          let target: string | null = null;
+          const local = spec.match(/^(?:file|link):(.+)$/u)?.[1];
+          if (local !== undefined) target = path.posix.normalize(path.posix.join(current, local)).replace(/\/+$/u, "");
+          else if (info.byName.has(name)) target = info.byName.get(name) as string;
+          if (target !== null && !target.startsWith("..") && !found.has(target)) {
+            found.add(target);
+            queue.push(target);
+          }
+        }
+      }
+    }
+    return [...found];
+  }
+
+  type Prepared = { dir: string; head: string; workspaces: WorkspaceInfo };
+  const preparedThisRound = new Map<string, Promise<Prepared>>();
+  const followKey = (spec: PackageSpec) => `${repoKey(spec)}${spec.ref ? `@${spec.ref}` : ""}`;
+
+  /** The machine's checkout of a followed repository at its newest commit, with the root workspace dependencies installed; once per sync round. */
+  function prepareFollowed(spec: PackageSpec): Promise<Prepared> {
+    const key = followKey(spec);
+    const existing = preparedThisRound.get(key);
+    if (existing !== undefined) return existing;
+    const work = (async () => {
+      const mirror = await syncMirror(spec);
+      const head = (await git(["rev-parse", `${spec.ref ?? "HEAD"}^{commit}`], mirror)).trim();
+      const dir = path.join(path.dirname(await ensureMirrorRoot()), "follow", spec.owner.toLowerCase(), `${spec.name.toLowerCase()}${spec.ref ? `@${spec.ref.replace(/[^A-Za-z0-9._-]+/gu, "_")}` : ""}`);
+      if (!(await exists(path.join(dir, ".git")))) {
+        await mkdir(path.dirname(dir), { recursive: true });
+        await rm(dir, { recursive: true, force: true });
+        await git(["clone", "--quiet", "--no-checkout", mirror, dir]);
+      } else {
+        await git(["fetch", "--quiet", "origin"], dir);
+      }
+      const current = (await git(["rev-parse", "HEAD"], dir).catch(() => "")).trim();
+      if (current !== head) await git(["checkout", "--quiet", "--force", "--detach", head], dir);
+      const workspaces = await readWorkspaces(dir);
+      const rootKey = `follow-root:${key}`;
+      const rootAt = (await bb.storage.kv.get<string>(rootKey)) ?? null;
+      const rootChanged = rootAt === null || !(await exists(path.join(dir, "node_modules"))) || (await anyChanged(dir, rootAt, head, ROOT_FILES));
+      if (workspaces.patterns.length > 0 && rootChanged) {
+        bb.log.info(`installing the workspace dependencies of ${repoDisplay(spec)} at ${head.slice(0, 12)}`);
+        await installDependencies(dir);
+      }
+      await bb.storage.kv.set(rootKey, head);
+      return { dir, head, workspaces };
+    })();
+    preparedThisRound.set(key, work);
+    return work;
+  }
+
+  /** Whether any of these paths differs between two commits of a checkout; unknown counts as changed. */
+  async function anyChanged(dir: string, from: string, to: string, paths: string[]): Promise<boolean> {
+    if (from === to) return false;
+    if (!COMMIT_PATTERN.test(from)) return true;
+    const out = await git(["diff", "--name-only", from, to, "--", ...paths.map((entry) => (entry === "" ? "." : entry))], dir).catch(() => null);
+    return out === null || out.trim() !== "";
+  }
+
+  /** Install or rebuild a plugin of a followed repository from the hub's checkout. */
+  async function installFollowed(spec: PackageSpec, label: string, pluginId: string): Promise<SyncResult> {
+    const prepared = await prepareFollowed(spec);
+    const pluginDir = path.join(prepared.dir, ...spec.path.split("/").filter(Boolean));
+    const installed = (await bb.sdk.plugins.list()).plugins.find((entry) => entry.id === pluginId);
+    const here = installed !== undefined && path.resolve(installed.rootDir) === path.resolve(pluginDir);
+    if (installed !== undefined && !here && !installed.source.startsWith("path:")) {
+      return {
+        repo: label,
+        pluginId,
+        outcome: "other-source",
+        detail: `Installed from ${installed.source}. To install it from the followed repository instead, run \`bb plugin remove ${pluginId}\` (this deletes its settings and data) and \`bb hub sync\`.`,
+        version: installed.version,
+      };
+    }
+    const builtKey = `follow-built:${followKey(spec)}|${spec.path}`;
+    const builtAt = (await bb.storage.kv.get<string>(builtKey)) ?? null;
+    const watched = [...(await watchedFolders(prepared.dir, spec.path, prepared.workspaces)), ...ROOT_FILES];
+    if (here && builtAt !== null && !(await anyChanged(prepared.dir, builtAt, prepared.head, watched))) {
+      return { repo: label, pluginId, outcome: "current", detail: null, version: installed.version };
+    }
+    // Its own dependencies, unless the root workspace install covered it.
+    const manifest = JSON.parse(await readFile(path.join(pluginDir, "package.json"), "utf8")) as Record<string, unknown>;
+    const hasDependencies = ["dependencies", "devDependencies"].some((key) => Object.keys(z.record(z.string(), z.unknown()).catch({}).parse(manifest[key] ?? {})).length > 0);
+    // Sibling packages it uses that no workspace install covers get theirs too.
+    for (const folder of watched.filter((entry) => entry !== spec.path && !ROOT_FILES.includes(entry))) {
+      if (inWorkspaces(folder, prepared.workspaces) || (await exists(path.join(prepared.dir, folder, "node_modules")))) continue;
+      const sibling = await readFile(path.join(prepared.dir, folder, "package.json"), "utf8").then((text) => JSON.parse(text) as Record<string, unknown>, () => null);
+      if (sibling !== null && ["dependencies", "devDependencies"].some((key) => Object.keys(z.record(z.string(), z.unknown()).catch({}).parse(sibling[key] ?? {})).length > 0)) {
+        await installDependencies(path.join(prepared.dir, folder));
+      }
+    }
+    if (hasDependencies && !inWorkspaces(spec.path, prepared.workspaces)) await installDependencies(pluginDir);
+    // A path install builds the plugin in place; for an installed one it rebuilds and reloads it, keeping its settings and data.
+    const source = `path:${pluginDir}`;
+    let result: { id: string; version: string };
+    try {
+      result = await installWithJob({ kind: "source", source, selection: { kind: "root" } }, () => bb.sdk.plugins.startInstall({ source }));
+    } catch (cause) {
+      const pending = stillInstalling(cause, label, pluginId);
+      if (pending !== null) return pending;
+      throw cause;
+    }
+    await bb.storage.kv.set(builtKey, prepared.head);
+    bb.log.info(`${installed === undefined ? "installed" : "rebuilt"} ${result.id}@${result.version} from ${label} at ${prepared.head.slice(0, 12)}`);
+    return {
+      repo: label,
+      pluginId,
+      outcome: installed === undefined ? "installed" : "updated",
+      detail: installed === undefined ? `built from ${prepared.head.slice(0, 12)}` : here ? `rebuilt at ${prepared.head.slice(0, 12)}` : `moved from ${installed.source}; settings kept`,
+      version: result.version,
+    };
+  }
+
   async function installOrUpdate(spec: PackageSpec, label: string): Promise<SyncResult> {
     const dir = await syncMirror(spec);
     const pluginId = pluginIdForPackageName((await readPackageJson(dir, spec.path)).name);
@@ -862,6 +1141,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (pluginId === bb.pluginId) {
       return { repo: label, pluginId, outcome: "skipped", detail: "The hub updates itself at the end of every sync.", version: null };
     }
+    if (spec.follow) return installFollowed(spec, label, pluginId);
     const installed = (await bb.sdk.plugins.list()).plugins.find((entry) => entry.id === pluginId);
     if (installed === undefined) {
       let result: { id: string; version: string };
@@ -1557,6 +1837,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function runSyncSteps(trigger: string): Promise<SyncReport> {
     const startedAt = Date.now();
     fetchedThisRound.clear();
+    preparedThisRound.clear();
     const results: SyncResult[] = [];
     let from = "—";
     let startSelfUpdate = false;
@@ -2172,14 +2453,10 @@ export default async function plugin(bb: BbPluginApi) {
         const clone = path.join(scratch, "repo");
         await git(["clone", "--quiet", "--depth", "1", ...(parsed.ref ? ["--branch", parsed.ref] : []), parsed.repo.url, clone]);
         const subdir = options.subdir?.trim().replace(/^\/+|\/+$/gu, "") || parsed.path || undefined;
-        // A repository with several plugins and its own marketplace.json: add
-        // them from that marketplace, the way bb installs them (released tags).
-        const fromMarketplace = await repoMarketplacePlugins(clone, subdir);
-        let notListed: string | null = null;
-        if (fromMarketplace !== null) {
-          if (fromMarketplace.ids.length > 0) return addFromRepoMarketplace(fromMarketplace, parsed.repo, options.group);
-          notListed = `${subdir} isn't listed in the repository's ${fromMarketplace.name} marketplace, so it is installed straight from its folder instead.`;
-        }
+        // A repository with several plugins (its root isn't one): follow it,
+        // so every plugin in it (or the one folder given) is built from a
+        // checkout of the whole repository, sibling packages included.
+        if (!(await isPluginDir(clone))) return addFollow(clone, parsed.repo, parsed.ref, subdir, options.group);
         const pluginDir = await findPluginDir(clone, subdir);
         const { pluginId, warning } = await checkManifest(pluginDir);
         if (pluginId === bb.pluginId) throw new Error("That is the hub itself.");
@@ -2210,7 +2487,7 @@ export default async function plugin(bb: BbPluginApi) {
           return { ...withoutUninstall(document, pluginId), remote: [...list, entry] };
         }, `Add remote plugin ${label}`, options.group);
         bb.log.info(`added remote plugin ${label} (${pluginId}) as ${commit ?? "?"}`);
-        return { folder: label, pluginId, commit, warning: [notListed, warning].filter(Boolean).join(" ") || null, unchanged: false, kind: "remote" as "remote" | "marketplace" };
+        return { folder: label, pluginId, commit, warning, unchanged: false, kind: "remote" as "remote" | "followed" };
       } finally {
         await rm(scratch, { recursive: true, force: true });
       }
@@ -2223,95 +2500,74 @@ export default async function plugin(bb: BbPluginApi) {
     return { ...result, guaranteedBy: scheduleView(null).guaranteedBy, sync };
   }
 
-  type RepoMarketplace = { name: string; folder: string; ids: string[] };
-
   /**
-   * The plugins to add through a repository's own marketplace.json, or null
-   * to add the plugin straight from its folder:
-   * - no folder given, and the repository holds several plugins (its root
-   *   isn't one) with a marketplace.json at the root (or in the given folder):
-   *   every plugin it lists;
-   * - one plugin folder of such a repository: that plugin, if the
-   *   marketplace lists it (ids is empty when it doesn't).
+   * Follow a repository with several plugins: a "follow" entry (one per
+   * repository; a folder given adds just that plugin to its "include").
+   * Remote entries for the same repository are dropped (the follow replaces them).
    */
-  async function repoMarketplacePlugins(clone: string, subdir: string | undefined): Promise<RepoMarketplace | null> {
-    const read = async (folder: string) => {
-      const text = await readFile(path.join(clone, folder, "marketplace.json"), "utf8").catch(() => null);
-      if (text === null) return null;
-      const parsed = z
-        .object({
-          name: z.string().min(1),
-          plugins: z.array(z.object({ id: z.string().min(1), source: z.unknown().optional() }).passthrough()).default([]),
-        })
-        .safeParse(JSON.parse(text));
-      if (!parsed.success) throw new Error(`${folder ? `${folder}/` : ""}marketplace.json isn't a valid bb marketplace: ${parsed.error.issues[0]?.message ?? "unreadable"}.`);
-      if (BUILT_IN_MARKETPLACES.has(parsed.data.name)) throw new Error(`${folder ? `${folder}/` : ""}marketplace.json uses the reserved name "${parsed.data.name}".`);
-      return { ...parsed.data, folder };
-    };
-    const subdirOf = (source: unknown) => {
-      const git = z.object({ git: z.object({ subdir: z.string().optional() }).passthrough() }).safeParse(source);
-      return git.success ? (git.data.git.subdir ?? "").replace(/^\/+|\/+$/gu, "") : null;
-    };
-    if (await isPluginDir(clone)) return null;
-    if (subdir === undefined) {
-      const market = await read("");
-      return market === null ? null : { name: market.name, folder: "", ids: market.plugins.map((plugin) => plugin.id) };
-    }
-    if (!PATH_PATTERN.test(subdir)) throw new Error(`Invalid subdir "${subdir}".`);
-    if (!(await isPluginDir(path.join(clone, subdir)))) {
-      const market = await read(subdir);
-      return market === null ? null : { name: market.name, folder: subdir, ids: market.plugins.map((plugin) => plugin.id) };
-    }
-    const market = await read("");
-    if (market === null) return null;
-    return { name: market.name, folder: "", ids: market.plugins.filter((plugin) => subdirOf(plugin.source) === subdir).map((plugin) => plugin.id) };
-  }
-
-  /** Register a repository's marketplace with bb and add its plugins as marketplace plugins, in one commit. */
-  async function addFromRepoMarketplace(market: RepoMarketplace, repo: RepoRef, groupId?: string) {
-    let registered = (await bb.sdk.plugins.marketplaces.list()).find((item) => item.name === market.name);
-    if (registered === undefined) {
-      registered = await bb.sdk.plugins.marketplaces.add({ source: `git:${repo.url}`, ...(market.folder ? { subdirectory: market.folder } : {}) });
-      bb.log.info(`added marketplace ${registered.name} from ${repoDisplay(repo)}`);
-      if (registered.name !== market.name) throw new Error(`bb registered the marketplace as "${registered.name}", not "${market.name}".`);
-    } else {
-      await bb.sdk.plugins.marketplaces.refresh({ name: market.name }).catch(() => undefined);
-    }
-    const marketSource = { source: registered.source, ...(registered.subdirectory ? { subdirectory: registered.subdirectory } : {}) };
-    const plans: Awaited<ReturnType<BbPluginApi["sdk"]["plugins"]["catalog"]["installPlan"]>>[] = [];
-    for (const id of market.ids) {
-      const plan = await bb.sdk.plugins.catalog.installPlan({ entryId: id, marketplace: market.name });
-      if (plan.pluginId === bb.pluginId) continue;
-      plans.push(plan);
-    }
-    const added: string[] = [];
-    const commit = await editPackagesJson((document) => {
-      const list = z.array(z.record(z.string(), z.unknown())).catch([]).parse(document.marketplace ?? []);
-      let next: Record<string, unknown> = document;
-      for (const plan of plans) {
-        if (list.some((item) => item.id === plan.entryId && item.marketplace === market.name)) continue;
-        list.push({ id: plan.entryId, marketplace: market.name, ...marketSource });
-        next = withoutUninstall(next, plan.pluginId);
-        added.push(plan.entryId);
+  async function addFollow(clone: string, repo: RepoRef, ref: string | null, subdir: string | undefined, groupId?: string) {
+    const folders: string[] = [];
+    const walk = async (dir: string, depth: number) => {
+      if (depth > 4 || folders.length >= 100) return;
+      for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+        if (!entry.isDirectory() || SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        const child = path.join(dir, entry.name);
+        if (await isPluginDir(child)) folders.push(path.relative(clone, child).split(path.sep).join("/"));
+        else await walk(child, depth + 1);
       }
-      return { ...next, marketplace: list };
-    }, `Add ${market.ids.join(", ")} from the ${market.name} marketplace (${repoDisplay(repo)}) to hub packages`, groupId);
-    const incompatible = plans.filter((plan) => !plan.compatible).map((plan) => `${plan.entryId} (${plan.incompatibleReason ?? "not compatible with this bb"})`);
-    const already = market.ids.filter((id) => !added.includes(id));
-    bb.log.info(`added ${added.join(", ") || "nothing"} from the ${market.name} marketplace (${commit ?? "no change"})`);
+    };
+    await walk(clone, 1);
+    if (folders.length === 0) throw new Error('No bb plugin found in the repository (a package.json with a "bb" section).');
+    if (subdir !== undefined && !folders.includes(subdir)) {
+      throw new Error(`${subdir} isn't a bb plugin folder of ${repoDisplay(repo)}. Its plugins: ${folders.join(", ")}.`);
+    }
+    const chosen = subdir === undefined ? folders : [subdir];
+    const ids: string[] = [];
+    for (const folder of chosen) {
+      const name = await readFile(path.join(clone, folder, "package.json"), "utf8").then((text) => (JSON.parse(text) as { name?: unknown }).name, () => null);
+      const pluginId = typeof name === "string" ? pluginIdForPackageName(name) : "";
+      if (pluginId !== "" && pluginId !== bb.pluginId) ids.push(pluginId);
+    }
+    const same = (item: Record<string, unknown>) => {
+      try {
+        return repoKey(parseRepo(String(item.repo ?? ""))) === repoKey(repo);
+      } catch {
+        return false;
+      }
+    };
+    let replaced = 0;
+    const commit = await editPackagesJson((document) => {
+      let next: Record<string, unknown> = { ...document };
+      const follow = entries(document, "follow");
+      const existing = follow.find(same);
+      if (existing === undefined) {
+        follow.push({ repo: repoDisplay(repo), ...(ref ? { ref } : {}), ...(subdir !== undefined ? { include: [subdir] } : {}) });
+      } else if (subdir === undefined) {
+        delete existing.include;
+        delete existing.exclude;
+      } else if (Array.isArray(existing.include)) {
+        existing.include = [...new Set([...(existing.include as string[]), subdir])];
+      } else if (Array.isArray(existing.exclude)) {
+        existing.exclude = (existing.exclude as string[]).filter((folder) => folder !== subdir);
+      }
+      next.follow = follow;
+      for (const key of ["remote", "plugins"] as const) {
+        if (!Array.isArray(document[key])) continue;
+        const list = entries(document, key);
+        replaced += list.filter(same).length;
+        next[key] = list.filter((item) => !same(item));
+      }
+      for (const id of ids) next = withoutUninstall(next, id);
+      return next;
+    }, `Follow ${repoDisplay(repo)}${subdir !== undefined ? ` (${subdir})` : ""}: ${chosen.join(", ")}`, groupId);
+    bb.log.info(`following ${repoDisplay(repo)}: ${chosen.join(", ")} (${commit ?? "no change"})`);
     return {
-      folder: `${market.name} marketplace: ${(added.length > 0 ? added : market.ids).join(", ")}`,
-      pluginId: plans.map((plan) => plan.pluginId).join(", "),
+      folder: `${repoDisplay(repo)} (followed): ${chosen.join(", ")}`,
+      pluginId: ids.join(", "),
       commit,
-      warning:
-        [
-          already.length > 0 && added.length > 0 ? `Already there: ${already.join(", ")}.` : "",
-          incompatible.length > 0 ? `Not compatible with this bb: ${incompatible.join("; ")}.` : "",
-        ]
-          .filter(Boolean)
-          .join(" ") || null,
-      unchanged: added.length === 0,
-      kind: "marketplace" as "remote" | "marketplace",
+      warning: replaced > 0 ? `It replaces ${replaced} remote entr${replaced === 1 ? "y" : "ies"} for the same repository.` : null,
+      unchanged: commit === null,
+      kind: "followed" as "remote" | "followed",
     };
   }
 
@@ -2334,6 +2590,32 @@ export default async function plugin(bb: BbPluginApi) {
           const list = z.array(z.record(z.string(), z.unknown())).catch([]).parse(document[key] ?? []);
           removed = [...removed, ...list.filter(matches).map((item) => `${String(item.repo)}${item.path ? `/${String(item.path)}` : ""}`)];
           if (document[key] !== undefined) next[key] = list.filter((item) => !matches(item));
+        }
+        // A followed repository: a folder leaves it (exclude / include), or the whole follow goes.
+        if (Array.isArray(document.follow)) {
+          const follow: Record<string, unknown>[] = [];
+          for (const item of entries(document, "follow")) {
+            let sameRepo = false;
+            try {
+              sameRepo = repoKey(parseRepo(String(item.repo ?? ""))) === repoKey(parsed.repo);
+            } catch {
+              sameRepo = false;
+            }
+            if (!sameRepo) {
+              follow.push(item);
+            } else if (folder === "") {
+              removed.push(`${String(item.repo)} (followed)`);
+            } else {
+              removed.push(`${String(item.repo)}/${folder} (followed)`);
+              if (Array.isArray(item.include)) {
+                const include = (item.include as string[]).filter((entry) => entry.replace(/^\/+|\/+$/gu, "") !== folder);
+                if (include.length > 0) follow.push({ ...item, include });
+              } else {
+                follow.push({ ...item, exclude: [...new Set([...((item.exclude as string[] | undefined) ?? []), folder])] });
+              }
+            }
+          }
+          next.follow = follow;
         }
         if (removed.length === 0) throw new Error(`${text} is not a remote plugin.`);
         return next;
@@ -2911,8 +3193,8 @@ export default async function plugin(bb: BbPluginApi) {
               stdout: [
                 added.unchanged
                   ? `${added.folder} is unchanged; nothing to commit.`
-                  : added.kind === "marketplace"
-                    ? `Added from the repository's own marketplace (installed the way bb's marketplace does): ${added.folder}. Pushed commit ${added.commit}.`
+                  : added.kind === "followed"
+                    ? `Following ${added.folder}; every hub builds them from a checkout of the repository (sibling packages included). Pushed commit ${added.commit}.`
                     : added.kind === "remote"
                     ? `Added remote plugin ${added.folder} (plugin id ${added.pluginId}); nothing copied. Pushed commit ${added.commit}.`
                     : `Copied into ${added.folder} as a local plugin (plugin id ${added.pluginId}) and pushed commit ${added.commit}.`,
