@@ -13,5 +13,10 @@
       "marketplace": "ensembleworks",
       "source": "git:https://github.com/lean-software-production/ensembleworks.git@HEAD"
     }
+  ],
+  "follow": [
+    {
+      "repo": "lean-software-production/ensembleworks"
+    }
   ]
 }
