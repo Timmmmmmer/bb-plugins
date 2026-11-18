@@ -436,7 +436,8 @@ export const rpcContract = defineRpcContract({
       commit: z.string().nullable(),
       warning: z.string().nullable(),
       unchanged: z.boolean(),
-      kind: z.enum(["local", "remote"]),
+      /** marketplace: added from the repository's own marketplace.json (several plugins). */
+      kind: z.enum(["local", "remote", "marketplace"]),
       guaranteedBy: z.string(),
       sync: syncResultSchema.nullable(),
     }),
@@ -2170,7 +2171,15 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         const clone = path.join(scratch, "repo");
         await git(["clone", "--quiet", "--depth", "1", ...(parsed.ref ? ["--branch", parsed.ref] : []), parsed.repo.url, clone]);
-        const subdir = options.subdir?.trim() || parsed.path || undefined;
+        const subdir = options.subdir?.trim().replace(/^\/+|\/+$/gu, "") || parsed.path || undefined;
+        // A repository with several plugins and its own marketplace.json: add
+        // them from that marketplace, the way bb installs them (released tags).
+        const fromMarketplace = await repoMarketplacePlugins(clone, subdir);
+        let notListed: string | null = null;
+        if (fromMarketplace !== null) {
+          if (fromMarketplace.ids.length > 0) return addFromRepoMarketplace(fromMarketplace, parsed.repo, options.group);
+          notListed = `${subdir} isn't listed in the repository's ${fromMarketplace.name} marketplace, so it is installed straight from its folder instead.`;
+        }
         const pluginDir = await findPluginDir(clone, subdir);
         const { pluginId, warning } = await checkManifest(pluginDir);
         if (pluginId === bb.pluginId) throw new Error("That is the hub itself.");
@@ -2201,15 +2210,109 @@ export default async function plugin(bb: BbPluginApi) {
           return { ...withoutUninstall(document, pluginId), remote: [...list, entry] };
         }, `Add remote plugin ${label}`, options.group);
         bb.log.info(`added remote plugin ${label} (${pluginId}) as ${commit ?? "?"}`);
-        return { folder: label, pluginId, commit, warning, unchanged: false, kind: "remote" as const };
+        return { folder: label, pluginId, commit, warning: [notListed, warning].filter(Boolean).join(" ") || null, unchanged: false, kind: "remote" as "remote" | "marketplace" };
       } finally {
         await rm(scratch, { recursive: true, force: true });
       }
     });
     const report = await requestSync("plugin added");
-    const sync = report.results.find((entry) => entry.pluginId === result.pluginId) ?? null;
+    const ids = result.pluginId.split(", ");
+    const sync = report.results.find((entry) => entry.pluginId !== null && ids.includes(entry.pluginId) && entry.outcome === "failed")
+      ?? report.results.find((entry) => entry.pluginId !== null && ids.includes(entry.pluginId)) ?? null;
     bb.realtime.publish(HUB_CHANGED, { added: result.folder });
     return { ...result, guaranteedBy: scheduleView(null).guaranteedBy, sync };
+  }
+
+  type RepoMarketplace = { name: string; folder: string; ids: string[] };
+
+  /**
+   * The plugins to add through a repository's own marketplace.json, or null
+   * to add the plugin straight from its folder:
+   * - no folder given, and the repository holds several plugins (its root
+   *   isn't one) with a marketplace.json at the root (or in the given folder):
+   *   every plugin it lists;
+   * - one plugin folder of such a repository: that plugin, if the
+   *   marketplace lists it (ids is empty when it doesn't).
+   */
+  async function repoMarketplacePlugins(clone: string, subdir: string | undefined): Promise<RepoMarketplace | null> {
+    const read = async (folder: string) => {
+      const text = await readFile(path.join(clone, folder, "marketplace.json"), "utf8").catch(() => null);
+      if (text === null) return null;
+      const parsed = z
+        .object({
+          name: z.string().min(1),
+          plugins: z.array(z.object({ id: z.string().min(1), source: z.unknown().optional() }).passthrough()).default([]),
+        })
+        .safeParse(JSON.parse(text));
+      if (!parsed.success) throw new Error(`${folder ? `${folder}/` : ""}marketplace.json isn't a valid bb marketplace: ${parsed.error.issues[0]?.message ?? "unreadable"}.`);
+      if (BUILT_IN_MARKETPLACES.has(parsed.data.name)) throw new Error(`${folder ? `${folder}/` : ""}marketplace.json uses the reserved name "${parsed.data.name}".`);
+      return { ...parsed.data, folder };
+    };
+    const subdirOf = (source: unknown) => {
+      const git = z.object({ git: z.object({ subdir: z.string().optional() }).passthrough() }).safeParse(source);
+      return git.success ? (git.data.git.subdir ?? "").replace(/^\/+|\/+$/gu, "") : null;
+    };
+    if (await isPluginDir(clone)) return null;
+    if (subdir === undefined) {
+      const market = await read("");
+      return market === null ? null : { name: market.name, folder: "", ids: market.plugins.map((plugin) => plugin.id) };
+    }
+    if (!PATH_PATTERN.test(subdir)) throw new Error(`Invalid subdir "${subdir}".`);
+    if (!(await isPluginDir(path.join(clone, subdir)))) {
+      const market = await read(subdir);
+      return market === null ? null : { name: market.name, folder: subdir, ids: market.plugins.map((plugin) => plugin.id) };
+    }
+    const market = await read("");
+    if (market === null) return null;
+    return { name: market.name, folder: "", ids: market.plugins.filter((plugin) => subdirOf(plugin.source) === subdir).map((plugin) => plugin.id) };
+  }
+
+  /** Register a repository's marketplace with bb and add its plugins as marketplace plugins, in one commit. */
+  async function addFromRepoMarketplace(market: RepoMarketplace, repo: RepoRef, groupId?: string) {
+    let registered = (await bb.sdk.plugins.marketplaces.list()).find((item) => item.name === market.name);
+    if (registered === undefined) {
+      registered = await bb.sdk.plugins.marketplaces.add({ source: `git:${repo.url}`, ...(market.folder ? { subdirectory: market.folder } : {}) });
+      bb.log.info(`added marketplace ${registered.name} from ${repoDisplay(repo)}`);
+      if (registered.name !== market.name) throw new Error(`bb registered the marketplace as "${registered.name}", not "${market.name}".`);
+    } else {
+      await bb.sdk.plugins.marketplaces.refresh({ name: market.name }).catch(() => undefined);
+    }
+    const marketSource = { source: registered.source, ...(registered.subdirectory ? { subdirectory: registered.subdirectory } : {}) };
+    const plans: Awaited<ReturnType<BbPluginApi["sdk"]["plugins"]["catalog"]["installPlan"]>>[] = [];
+    for (const id of market.ids) {
+      const plan = await bb.sdk.plugins.catalog.installPlan({ entryId: id, marketplace: market.name });
+      if (plan.pluginId === bb.pluginId) continue;
+      plans.push(plan);
+    }
+    const added: string[] = [];
+    const commit = await editPackagesJson((document) => {
+      const list = z.array(z.record(z.string(), z.unknown())).catch([]).parse(document.marketplace ?? []);
+      let next: Record<string, unknown> = document;
+      for (const plan of plans) {
+        if (list.some((item) => item.id === plan.entryId && item.marketplace === market.name)) continue;
+        list.push({ id: plan.entryId, marketplace: market.name, ...marketSource });
+        next = withoutUninstall(next, plan.pluginId);
+        added.push(plan.entryId);
+      }
+      return { ...next, marketplace: list };
+    }, `Add ${market.ids.join(", ")} from the ${market.name} marketplace (${repoDisplay(repo)}) to hub packages`, groupId);
+    const incompatible = plans.filter((plan) => !plan.compatible).map((plan) => `${plan.entryId} (${plan.incompatibleReason ?? "not compatible with this bb"})`);
+    const already = market.ids.filter((id) => !added.includes(id));
+    bb.log.info(`added ${added.join(", ") || "nothing"} from the ${market.name} marketplace (${commit ?? "no change"})`);
+    return {
+      folder: `${market.name} marketplace: ${(added.length > 0 ? added : market.ids).join(", ")}`,
+      pluginId: plans.map((plan) => plan.pluginId).join(", "),
+      commit,
+      warning:
+        [
+          already.length > 0 && added.length > 0 ? `Already there: ${already.join(", ")}.` : "",
+          incompatible.length > 0 ? `Not compatible with this bb: ${incompatible.join("; ")}.` : "",
+        ]
+          .filter(Boolean)
+          .join(" ") || null,
+      unchanged: added.length === 0,
+      kind: "marketplace" as "remote" | "marketplace",
+    };
   }
 
   /** Stop pointing to a remote plugin (machines keep it installed). */
@@ -2808,7 +2911,9 @@ export default async function plugin(bb: BbPluginApi) {
               stdout: [
                 added.unchanged
                   ? `${added.folder} is unchanged; nothing to commit.`
-                  : added.kind === "remote"
+                  : added.kind === "marketplace"
+                    ? `Added from the repository's own marketplace (installed the way bb's marketplace does): ${added.folder}. Pushed commit ${added.commit}.`
+                    : added.kind === "remote"
                     ? `Added remote plugin ${added.folder} (plugin id ${added.pluginId}); nothing copied. Pushed commit ${added.commit}.`
                     : `Copied into ${added.folder} as a local plugin (plugin id ${added.pluginId}) and pushed commit ${added.commit}.`,
                 ...(added.warning ? [`Note: ${added.warning}`] : []),

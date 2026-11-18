@@ -126,6 +126,9 @@ starts.
   - A **public** git repo (`owner/name`, an https URL, or a GitHub folder link)
     becomes a **remote plugin**: nothing is copied; `packages.json` points to
     it and every hub installs it from there. Private repositories are refused.
+    If the repository holds several plugins and has its own `marketplace.json`,
+    every plugin listed there is added as a **marketplace plugin** instead, and
+    installed the way bb's marketplace does (from its released versions).
   - A folder or `.zip`/`.tar` (file, URL, or dropped on the page, up to 8 MB)
     is copied into `plugins/` as a **local plugin**, without `node_modules`,
     `dist`, `.git`, or `.env`. Uploading the folder on GitHub, or
