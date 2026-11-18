@@ -354,6 +354,17 @@ export const rpcContract = defineRpcContract({
       compatible: z.boolean(),
     })),
   },
+  hub_move: {
+    input: z.object({
+      kind: z.enum(["local", "remote", "marketplace"]),
+      /** local: the folder path; remote: the repo; marketplace: id@marketplace. */
+      ref: z.string().trim().min(1).max(500),
+      path: z.string().trim().max(200).optional(),
+      from: z.string().trim().max(64).optional(),
+      to: z.string().trim().min(1).max(64),
+    }),
+    output: z.object({ kind: z.string(), label: z.string(), from: z.string(), to: z.string(), commit: z.string().nullable(), guaranteedBy: z.string(), results: z.number() }),
+  },
   hub_group_subscribe: {
     input: z.object({ group: z.string().trim().min(1).max(64), subscribed: z.boolean() }),
     output: z.object({ group: z.string(), name: z.string(), subscribed: z.boolean(), guaranteedBy: z.string() }),
@@ -770,6 +781,22 @@ export default async function plugin(bb: BbPluginApi) {
     // means reinstalling, which resets the plugin's data, so it is never automatic.
     const from = installedFolder(installed);
     if (from !== null && from !== spec.path) {
+      // The folder it was installed from is gone (the plugin was moved to
+      // another group): reinstall from the new folder, or it can never update
+      // again. This resets its settings and data; moving says so up front.
+      const stillThere = await git(["cat-file", "-e", `HEAD:${inFolder(from, "package.json")}`], dir).then(() => true, () => false);
+      if (!stillThere) {
+        await bb.sdk.plugins.remove({ pluginId });
+        const result = await bb.sdk.plugins.install({ source: sourceFor(spec), ...(spec.path ? { subdirectory: spec.path } : {}) });
+        bb.log.info(`reinstalled ${pluginId} from ${spec.path}: it moved from ${from}`);
+        return {
+          repo: label,
+          pluginId,
+          outcome: "installed",
+          detail: `moved from ${from}; reinstalled from its new folder (its settings and data were reset)`,
+          version: result.version,
+        };
+      }
       return {
         repo: label,
         pluginId,
@@ -998,6 +1025,121 @@ export default async function plugin(bb: BbPluginApi) {
     const removedHere = report.results.some((result) => result.pluginId === outcome.pluginId && result.outcome === "removed");
     bb.realtime.publish(HUB_CHANGED, { deleted: outcome.folder });
     return { ...outcome, removedHere, guaranteedBy: scheduleView(null).guaranteedBy };
+  }
+
+  // -------------------------------------------------------------------------
+  // Moving plugins between groups
+
+  type MoveKind = "local" | "remote" | "marketplace";
+  const readJsonFile = async (file: string) => z.record(z.string(), z.unknown()).parse(JSON.parse(await readFile(file, "utf8")));
+  const writeJsonFile = async (file: string, document: Record<string, unknown>) => {
+    packagesFileSchema.parse(document);
+    await writeFile(file, `${JSON.stringify(document, null, 2)}\n`);
+  };
+  const entries = (document: Record<string, unknown>, key: string) =>
+    z.array(z.record(z.string(), z.unknown())).catch([]).parse(document[key] ?? []);
+
+  /**
+   * Move a plugin from one group to another in one commit.
+   * - local: its folder moves to the other group's plugins/. Every machine that
+   *   still gets it reinstalls it from the new folder at its next sync, which
+   *   resets its settings and data.
+   * - remote / marketplace: only its packages.json entry moves; nothing is
+   *   reinstalled and no data is lost.
+   * Machines subscribed only to the old group keep their copy, but it stops
+   * updating (like a removal).
+   */
+  async function movePlugin(kind: MoveKind, ref: string, fromId: string | undefined, toId: string, options: { path?: string } = {}) {
+    const outcome = await serialize(async () => {
+      const { packagesRepo, hubPath } = await readConfig();
+      const allGroups = await listGroups();
+      const to = await findGroup(toId);
+      // A local folder path names its own group; otherwise --from (default home).
+      const localRef = ref.replace(/^\/+|\/+$/gu, "");
+      const from =
+        kind === "local" && localRef.includes("/")
+          ? (allGroups.find((group) => group.id === groupOfFolder(localRef, allGroups)) as Group)
+          : await findGroup(fromId);
+      if (from.id === to.id) throw new Error(`It is already in ${to.name}.`);
+      const work = await workingClone(packagesRepo);
+      const fromFile = path.join(work, inGroup(from, "packages.json"));
+      const toFile = path.join(work, inGroup(to, "packages.json"));
+      const fromDoc = await readJsonFile(fromFile);
+      const toDoc = await readJsonFile(toFile);
+      let label: string;
+      let pluginId: string | null = null;
+      const paths = [inGroup(from, "packages.json"), inGroup(to, "packages.json")];
+
+      if (kind === "local") {
+        const fromPlugins = inGroup(from, PLUGINS_FOLDER);
+        const toPlugins = inGroup(to, PLUGINS_FOLDER);
+        const folder = localRef.includes("/") ? localRef : `${fromPlugins}/${localRef}`;
+        if (!folder.startsWith(`${fromPlugins}/`) || folder.slice(fromPlugins.length + 1).includes("/") || !PATH_PATTERN.test(folder)) {
+          throw new Error(`"${ref}" is not a local plugin folder of ${from.name} (expected ${fromPlugins}/<name>).`);
+        }
+        if (folder === hubPath) throw new Error("The hub can't be moved.");
+        const manifestText = await readFile(path.join(work, folder, "package.json"), "utf8").catch(() => null);
+        if (manifestText === null) throw new Error(`${folder} doesn't exist.`);
+        pluginId = pluginIdForPackageName(packageJsonSchema.parse(JSON.parse(manifestText)).name);
+        const name = folder.slice(fromPlugins.length + 1);
+        const target = `${toPlugins}/${name}`;
+        if (await access(path.join(work, target)).then(() => true, () => false)) throw new Error(`${target} already exists in ${to.name}.`);
+        for (const entry of await readdir(path.join(work, toPlugins), { withFileTypes: true }).catch(() => [])) {
+          if (!entry.isDirectory()) continue;
+          const other = await readFile(path.join(work, toPlugins, entry.name, "package.json"), "utf8")
+            .then((text) => pluginIdForPackageName((JSON.parse(text) as { name?: string }).name ?? ""), () => null);
+          if (other === pluginId) throw new Error(`Plugin id "${pluginId}" is already used by ${toPlugins}/${entry.name} in ${to.name}.`);
+        }
+        await mkdir(path.join(work, toPlugins), { recursive: true });
+        await git(["mv", folder, target], work);
+        // Drop it from the old group's exclude list.
+        if (Array.isArray(fromDoc.exclude)) {
+          fromDoc.exclude = (fromDoc.exclude as unknown[]).filter((entry) => inGroup(from, String(entry).replace(/\/+$/u, "")) !== folder);
+        }
+        paths.push(folder, target);
+        label = `${folder} → ${target}`;
+      } else if (kind === "remote") {
+        const parsed = parseRepoInput(ref);
+        const folder = (options.path ?? parsed.path ?? "").replace(/^\/+|\/+$/gu, "");
+        const matches = (item: Record<string, unknown>) => {
+          try {
+            return repoKey(parseRepo(String(item.repo ?? ""))) === repoKey(parsed.repo) && (folder === "" || String(item.path ?? "") === folder);
+          } catch {
+            return false;
+          }
+        };
+        const moved: Record<string, unknown>[] = [];
+        for (const key of ["remote", "plugins"] as const) {
+          if (fromDoc[key] === undefined) continue;
+          const list = entries(fromDoc, key);
+          moved.push(...list.filter(matches));
+          fromDoc[key] = list.filter((item) => !matches(item));
+        }
+        if (moved.length === 0) throw new Error(`${ref} is not a remote plugin of ${from.name}.`);
+        const existing = [...entries(toDoc, "remote"), ...entries(toDoc, "plugins")];
+        toDoc.remote = [...entries(toDoc, "remote"), ...moved.filter((item) => !existing.some((other) => matches(other) && String(other.path ?? "") === String(item.path ?? "")))];
+        label = `${repoDisplay(parsed.repo)}${folder ? `/${folder}` : ""}`;
+      } else {
+        const wanted = parseEntryArg(ref);
+        const matches = (item: Record<string, unknown>) => item.id === wanted.id && (wanted.marketplace === null || item.marketplace === wanted.marketplace);
+        const list = entries(fromDoc, "marketplace");
+        const moved = list.filter(matches);
+        if (moved.length === 0) throw new Error(`${ref} is not a marketplace plugin of ${from.name}.`);
+        fromDoc.marketplace = list.filter((item) => !matches(item));
+        const existing = entries(toDoc, "marketplace");
+        toDoc.marketplace = [...existing, ...moved.filter((item) => !existing.some((other) => other.id === item.id && other.marketplace === item.marketplace))];
+        label = moved.map((item) => `${String(item.id)}@${String(item.marketplace ?? "any")}`).join(", ");
+      }
+      // A plugin moved in is wanted there: take it off that group's uninstall list.
+      await writeJsonFile(fromFile, fromDoc);
+      await writeJsonFile(toFile, pluginId === null ? toDoc : withoutUninstall(toDoc, pluginId));
+      const commit = await commitAndPush(work, paths, `Move ${kind} plugin ${label} from ${from.name} to ${to.name}`, packagesRepo);
+      bb.log.info(`moved ${kind} plugin ${label} from ${from.id} to ${to.id} (${commit ?? "no change"})`);
+      return { kind, label, from: from.name, to: to.name, commit };
+    });
+    const report = await requestSync("plugin moved");
+    bb.realtime.publish(HUB_CHANGED, { moved: outcome.label });
+    return { ...outcome, guaranteedBy: scheduleView(null).guaranteedBy, results: report.results.length };
   }
 
   async function addMarketplacePlugin(arg: string, groupId?: string) {
@@ -1901,6 +2043,10 @@ export default async function plugin(bb: BbPluginApi) {
       const self = (await bb.sdk.plugins.list()).plugins.find((plugin) => plugin.id === bb.pluginId);
       return { ...(await listHub(input?.group)), lastSync, schedule: scheduleView(lastSync), hubVersion: self?.version ?? null };
     },
+    hub_move: ({ kind, ref, path: folder, from, to }, context) => {
+      clientOnly(context, "hub_move");
+      return movePlugin(kind, ref, from, to, { path: folder });
+    },
     hub_group_subscribe: ({ group, subscribed }, context) => {
       clientOnly(context, "hub_group_subscribe");
       return setSubscribed(group, subscribed);
@@ -2169,6 +2315,51 @@ export default async function plugin(bb: BbPluginApi) {
                 "Machines keep it installed but stop updating it; uninstall it with `bb plugin remove <id>` where it's no longer wanted.",
                 `Every running hub stops managing it by ${formatTime(removed.guaranteedBy)}.`,
               ].join("\n"),
+            };
+          },
+        }),
+        "plugin move": cliCommand({
+          summary: "Move a plugin to another group: a local folder (reinstalled everywhere, its data is reset) or a remote plugin's entry (no reinstall)",
+          positionals: [{ name: "plugin", description: 'A local folder ("hello" or "groups/x/plugins/hello") or a remote plugin\'s repo (owner/name or URL)', required: true }],
+          options: {
+            to: { type: "string", placeholder: "group", required: true, description: "The group to move it to" },
+            from: { type: "string", placeholder: "group", description: "The group it is in now (default: home; a full folder path says it)" },
+            path: { type: "string", placeholder: "folder", description: "For a remote plugin: only the entry for this folder in its repo" },
+            yes: { type: "boolean", description: "Confirm moving a local plugin: every machine reinstalls it, resetting its settings and data" },
+            ...jsonOption,
+          },
+          async run({ positionals, options }, ctx) {
+            const local = !(await isRepoSource(positionals.plugin, ctx.cwd));
+            if (local && !options.yes) {
+              throw new PluginCliError(
+                `Moving a local plugin moves its folder, so every machine that still gets it reinstalls it from the new folder at its next sync, which resets its settings and data. Machines only subscribed to the old group keep their copy, but it stops updating. Re-run with --yes to confirm.`,
+              );
+            }
+            const moved = await movePlugin(local ? "local" : "remote", positionals.plugin, options.from, options.to, { path: options.path }).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(moved) };
+            return {
+              exitCode: 0,
+              stdout: [
+                `Moved ${moved.kind} plugin ${moved.label} from ${moved.from} to ${moved.to}${moved.commit ? ` (commit ${moved.commit})` : ""}.`,
+                `Every running hub picks it up by ${formatTime(moved.guaranteedBy)}.`,
+              ].join("\n"),
+            };
+          },
+        }),
+        "marketplace move": cliCommand({
+          summary: "Move a marketplace plugin's entry to another group (nothing is reinstalled)",
+          positionals: [{ name: "entry", description: "<id> or <id>@<marketplace>", required: true }],
+          options: {
+            to: { type: "string", placeholder: "group", required: true, description: "The group to move it to" },
+            from: { type: "string", placeholder: "group", description: "The group it is in now (default: home)" },
+            ...jsonOption,
+          },
+          async run({ positionals, options }) {
+            const moved = await movePlugin("marketplace", positionals.entry, options.from, options.to).catch((cause) => { throw toCliError(cause); });
+            if (options.json) return { exitCode: 0, stdout: JSON.stringify(moved) };
+            return {
+              exitCode: 0,
+              stdout: `Moved ${moved.label} from ${moved.from} to ${moved.to}${moved.commit ? ` (commit ${moved.commit})` : ""}. Every running hub picks it up by ${formatTime(moved.guaranteedBy)}.`,
             };
           },
         }),

@@ -234,9 +234,107 @@ function GroupSelector({
 // 1-2. Packages and marketplace plugins
 
 /** Local (folders in the shared repo) and remote (other public repos) plugins, in one list. */
+type MoveTarget = { kind: "local" | "remote" | "marketplace"; ref: string; path?: string; name: string };
+
+function MoveButton({ name, busy, onClick, disabled }: { name: string; busy: string | null; onClick: () => void; disabled?: boolean }) {
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="size-6 text-muted-foreground hover:text-foreground"
+      aria-label={`Move ${name} to another group`}
+      disabled={busy !== null || disabled}
+      onClick={onClick}
+    >
+      <Icon name="ArrowLeftRight" className="size-3.5" />
+    </Button>
+  );
+}
+
+/** "Move to group": local plugins warn that every copy is reinstalled (data reset). */
+function MoveDialog({
+  target,
+  data,
+  onClose,
+  busy,
+  rpc,
+  run,
+}: {
+  target: MoveTarget | null;
+  data: HubData;
+  onClose: () => void;
+  busy: string | null;
+  rpc: Rpc;
+  run: Run;
+}) {
+  const others = data.groups.filter((group) => group.id !== data.group.id);
+  const [to, setTo] = useState<string>(others[0]?.id ?? "");
+  useEffect(() => {
+    if (target !== null && !others.some((group) => group.id === to)) setTo(others[0]?.id ?? "");
+  }, [target, others, to]);
+  const toName = others.find((group) => group.id === to)?.name ?? "";
+  return (
+    <Dialog open={target !== null} onOpenChange={(open) => (open ? null : onClose())}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Move {target?.name} to another group</DialogTitle>
+          <DialogDescription>
+            {target?.kind === "local" ? (
+              <>
+                Its folder moves from {data.group.name} to the group you pick. <strong>Every machine that still gets it
+                reinstalls it from the new folder at the next sync, which resets its settings and data.</strong> Machines
+                subscribed only to {data.group.name} keep their copy, but it stops updating.
+              </>
+            ) : (
+              <>
+                Its entry moves from {data.group.name} to the group you pick. Nothing is reinstalled and no data is lost.
+                Machines subscribed only to {data.group.name} keep it, but it stops updating.
+              </>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        <select
+          value={to}
+          onChange={(event) => setTo(event.target.value)}
+          aria-label="Move to group"
+          className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+        >
+          {others.map((group) => (
+            <option key={group.id} value={group.id}>
+              {group.name}
+            </option>
+          ))}
+        </select>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            variant={target?.kind === "local" ? "destructive" : "default"}
+            disabled={busy !== null || to === "" || target === null}
+            onClick={() => {
+              const move = target;
+              onClose();
+              if (move !== null) {
+                void run(`move:${move.ref}`, () =>
+                  rpc.call("hub_move", { kind: move.kind, ref: move.ref, ...(move.path ? { path: move.path } : {}), from: data.group.id, to }),
+                );
+              }
+            }}
+          >
+            {target?.kind === "local" ? `Move to ${toName} and reinstall` : `Move to ${toName}`}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
   const nameFor = (entry: PackageView) => entry.info?.name ?? entry.label;
   const [confirm, setConfirm] = useState<PackageView | null>(null);
+  const [moving, setMoving] = useState<MoveTarget | null>(null);
+  const canMove = data.groups.length > 1;
   const resultFor = (label: string) => data.lastSync?.results.find((result) => result.repo === label) ?? null;
   return (
     <>
@@ -258,7 +356,21 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
                 </span>
               }
               action={
-                entry.kind === "remote" ? (
+                <>
+                {canMove ? (
+                  <MoveButton
+                    name={nameFor(entry)}
+                    busy={busy}
+                    onClick={() =>
+                      setMoving(
+                        entry.kind === "remote"
+                          ? { kind: "remote", ref: entry.repo, ...(entry.path ? { path: entry.path } : {}), name: nameFor(entry) }
+                          : { kind: "local", ref: entry.path, name: nameFor(entry) },
+                      )
+                    }
+                  />
+                ) : null}
+                {entry.kind === "remote" ? (
                   <Button
                     variant="ghost"
                     size="icon"
@@ -284,12 +396,14 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
                   >
                     <Icon name="Trash2" className="size-3.5" />
                   </Button>
-                )
+                )}
+                </>
               }
             />
           ))}
         </List>
       )}
+      <MoveDialog target={moving} data={data} onClose={() => setMoving(null)} busy={busy} rpc={rpc} run={run} />
       <Dialog open={confirm !== null} onOpenChange={(open) => (open ? null : setConfirm(null))}>
         <DialogContent>
           <DialogHeader>
@@ -324,6 +438,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
 
 function MarketplacePlugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
   const resultFor = (label: string) => data.lastSync?.results.find((result) => result.repo === label) ?? null;
+  const [moving, setMoving] = useState<MoveTarget | null>(null);
   return (
     <>
       <Title>Marketplace plugins</Title>
@@ -339,21 +454,31 @@ function MarketplacePlugins({ data, busy, rpc, run }: { data: HubData; busy: str
               statusText={isSubscribed(data) ? undefined : "not subscribed"}
               details={<MarketplaceDetails item={item} result={resultFor(item.label)} />}
               action={
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-6 text-muted-foreground hover:text-foreground"
-                  aria-label={`Remove ${item.entry}`}
-                  disabled={busy !== null}
-                  onClick={() => void run(`mremove:${item.entry}`, () => rpc.call("hub_marketplace_remove", { entry: item.entry, group: data.group.id }))}
-                >
-                  <Icon name="X" className="size-3.5" />
-                </Button>
+                <>
+                  {data.groups.length > 1 ? (
+                    <MoveButton
+                      name={item.info?.name ?? item.entry}
+                      busy={busy}
+                      onClick={() => setMoving({ kind: "marketplace", ref: item.entry, name: item.info?.name ?? item.entry })}
+                    />
+                  ) : null}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6 text-muted-foreground hover:text-foreground"
+                    aria-label={`Remove ${item.entry}`}
+                    disabled={busy !== null}
+                    onClick={() => void run(`mremove:${item.entry}`, () => rpc.call("hub_marketplace_remove", { entry: item.entry, group: data.group.id }))}
+                  >
+                    <Icon name="X" className="size-3.5" />
+                  </Button>
+                </>
               }
             />
           ))}
         </List>
       )}
+      <MoveDialog target={moving} data={data} onClose={() => setMoving(null)} busy={busy} rpc={rpc} run={run} />
     </>
   );
 }

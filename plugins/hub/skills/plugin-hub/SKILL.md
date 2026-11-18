@@ -182,3 +182,22 @@ repository is reported `other-source` with a `bb hub adopt <folder>` hint and is
 never switched automatically, because switching reinstalls it and resets its
 data. A group's `uninstall` list only removes plugins installed from that
 group's own folders.
+
+### Moving between groups
+
+```sh
+bb hub plugin move <folder|repo> --to <group> [--from <group>] [--path <folder>] [--yes]
+bb hub marketplace move <id>[@<marketplace>] --to <group> [--from <group>]
+```
+
+One commit moves the plugin, and the page's ⇄ button does the same. A
+**local** plugin's folder moves (`git mv`), so it needs `--yes`: every hub that
+still gets the plugin finds that its installed folder no longer exists and
+reinstalls it from the new folder, which resets its settings and data. This
+is the only case where the hub switches folders by itself. A clash where both
+folders still exist is never switched automatically. **Remote** and
+**marketplace** moves only move the packages.json entry, with no reinstall and
+no data loss. In every case, machines subscribed only to the old group keep
+the plugin unmanaged. A moved-in plugin id leaves the destination group's
+`uninstall` list. The hub itself can't be moved. Confirm with the user before
+moving a local plugin.
