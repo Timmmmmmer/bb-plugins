@@ -419,7 +419,11 @@ export const rpcContract = defineRpcContract({
   hub_status: {
     input: z.null(),
     /** The sync running right now on this machine (what started it, and when), or null. */
-    output: z.object({ syncing: z.object({ trigger: z.string(), startedAt: z.string() }).nullable() }),
+    output: z.object({
+      syncing: z.object({ trigger: z.string(), startedAt: z.string() }).nullable(),
+      /** The hub is updating itself: applying (the old hub started it) or finishing (the new hub's first sync). */
+      updating: z.object({ phase: z.enum(["applying", "finishing"]), to: z.string().nullable() }).nullable(),
+    }),
   },
   hub_install: {
     input: z.object({ path: z.string().min(1).max(200) }),
@@ -2391,7 +2395,10 @@ export default async function plugin(bb: BbPluginApi) {
       }
     }
     bb.realtime.publish(HUB_CHANGED, { sync: report.at });
+    firstSyncDone = true;
     if (startSelfUpdate) {
+      selfUpdateStarted = true;
+      bb.realtime.publish(HUB_CHANGED, { updating: true });
       clearTimeout(selfUpdateTimer);
       selfUpdateTimer = setTimeout(() => {
         bb.sdk.plugins.experimental_startUpdate({ pluginId: bb.pluginId }).then(
@@ -2404,6 +2411,17 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   let syncing: { trigger: string; startedAt: string } | null = null;
+  const instanceStartedAt = Date.now();
+  let selfUpdateStarted = false;
+  let firstSyncDone = false;
+  /** Whether the hub is updating itself, for the page. */
+  async function updatingView(): Promise<{ phase: "applying" | "finishing"; to: string | null } | null> {
+    const attempt = await bb.storage.kv.get<SelfUpdateAttempt>(SELF_UPDATE_KEY);
+    if (selfUpdateStarted) return { phase: "applying", to: attempt?.to ?? null };
+    const recent = attempt !== undefined && attempt !== null && Date.parse(attempt.at) > instanceStartedAt - SELF_UPDATE_GRACE_MS;
+    if (recent && !firstSyncDone && Date.now() - instanceStartedAt < 120_000) return { phase: "finishing", to: attempt.to };
+    return null;
+  }
   let chain: Promise<unknown> = Promise.resolve();
   function serialize<T>(task: () => Promise<T>): Promise<T> {
     const next = chain.then(task);
@@ -3175,7 +3193,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     hub_status: (_input, context) => {
       clientOnly(context, "hub_status");
-      return { syncing };
+      return updatingView().then((updating) => ({ syncing, updating }));
     },
     hub_move: ({ kind, ref, path: folder, from, to }, context) => {
       clientOnly(context, "hub_move");

@@ -1109,11 +1109,21 @@ function HubPage() {
   const report = useCallback((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)), []);
   // A running sync on this machine (hub_status answers at once; hub_list waits for the sync).
   const [syncing, setSyncing] = useState<Syncing>(null);
+  // The hub updating itself (it reloads; calls fail for a moment while it restarts).
+  const [updating, setUpdating] = useState(false);
   const refreshStatus = useCallback(() => {
-    rpc.call("hub_status", null).then((status) => setSyncing(status.syncing), () => undefined);
+    rpc.call("hub_status", null).then(
+      (status) => {
+        setSyncing(status.syncing);
+        setUpdating(status.updating !== null);
+      },
+      () => undefined,
+    );
   }, [rpc]);
   // Only the newest hub_list answer counts (switching groups quickly).
   const latest = useRef(0);
+  const updatingRef = useRef(false);
+  updatingRef.current = updating;
   const refetch = useCallback(() => {
     refreshStatus();
     const request = ++latest.current;
@@ -1125,6 +1135,8 @@ function HubPage() {
       },
       (cause: unknown) => {
         if (request !== latest.current) return;
+        // While the hub restarts after updating itself, keep waiting instead of showing an error.
+        if (updatingRef.current) return;
         // A remembered group that no longer exists falls back to home.
         if (group !== "home" && String(cause).includes("no group")) selectGroup("home");
         else report(cause);
@@ -1135,6 +1147,18 @@ function HubPage() {
     refetch();
   }, [refetch]);
   const loading = data !== null && data.group.id !== group;
+  // While updating (or still loading), check every few seconds; reload the data once the update is done.
+  const wasUpdating = useRef(false);
+  useEffect(() => {
+    if (wasUpdating.current && !updating) refetch();
+    wasUpdating.current = updating;
+    if (!updating && data !== null) return;
+    const timer = setInterval(() => {
+      refreshStatus();
+      if (data === null) refetch();
+    }, 3_000);
+    return () => clearInterval(timer);
+  }, [updating, data === null, refreshStatus, refetch]);
   // Show a (un)subscribe at once; the group list catches up after the sync it starts.
   const onSubscribed = ({ group: id, subscribed }: { group: string; subscribed: boolean }) => {
     setData((previous) =>
@@ -1165,8 +1189,15 @@ function HubPage() {
             {error}
           </p>
         )}
+        {updating && data !== null ? (
+          <p className="mt-3">
+            <Spinner>Updating the hub… the page refreshes when it's done.</Spinner>
+          </p>
+        ) : null}
         {data === null ? (
-          <p className="mt-4 text-sm text-muted-foreground">Loading…</p>
+          <p className="mt-4">
+            <Spinner>{updating ? "Updating the hub…" : "Loading…"}</Spinner>
+          </p>
         ) : (
           <>
             <GroupSelector data={data} selected={group} onSelect={selectGroup} busy={busy} rpc={rpc} run={run} loading={loading} syncing={syncing} onSubscribed={onSubscribed} />
