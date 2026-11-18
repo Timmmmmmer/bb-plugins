@@ -11,6 +11,10 @@
     {
       "id": "bb-sidebar",
       "marketplace": "bb-community"
+    },
+    {
+      "id": "breathe",
+      "marketplace": "bb-community"
     }
   ]
 }
