@@ -1752,6 +1752,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function publishPlugin(dir: string, options: { group?: string; beta?: boolean }) {
     const beta = options.beta === true;
     const outcome = await serialize(async () => {
+      fetchedThisRound.clear(); // see the repository as it is now (e.g. a group added a moment ago)
       const source = path.resolve(dir);
       if (!(await isPluginDir(source))) throw new Error(`${source} is not a bb plugin folder (a package.json with a "bb" section).`);
       const { pluginId } = await checkManifest(source);
@@ -1794,6 +1795,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** Make a group's beta copy of a plugin its stable copy (the beta folder goes). Machines on the beta move to it without a reinstall. */
   async function promoteBeta(plugin: string, groupId?: string) {
     const outcome = await serialize(async () => {
+      fetchedThisRound.clear(); // see the repository as it is now (e.g. a group added a moment ago)
       const { packagesRepo } = await readConfig();
       const group = await findGroup(groupId);
       const work = await workingClone(packagesRepo);
@@ -1907,6 +1909,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** Add an empty group: a folder groups/<id> with its packages.json, listed in the root packages.json. */
   async function addGroup(rawName: string, rawId?: string) {
     const outcome = await serialize(async () => {
+      fetchedThisRound.clear(); // see the repository as it is now (e.g. a group added a moment ago)
       const name = cleanGroupName(rawName);
       const id = (rawId?.trim().toLowerCase() || groupIdFromName(name));
       if (!GROUP_ID_PATTERN.test(id)) {
@@ -1946,6 +1949,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** Rename a group (its display name only; the id and folder stay). The home group can be renamed too. */
   async function renameGroup(groupId: string, rawName: string) {
     const outcome = await serialize(async () => {
+      fetchedThisRound.clear(); // see the repository as it is now (e.g. a group added a moment ago)
       const name = cleanGroupName(rawName);
       const { packagesRepo } = await readConfig();
       const work = await workingClone(packagesRepo);
@@ -1984,6 +1988,7 @@ export default async function plugin(bb: BbPluginApi) {
    */
   async function removeGroup(groupId: string) {
     const outcome = await serialize(async () => {
+      fetchedThisRound.clear(); // see the repository as it is now (e.g. a group added a moment ago)
       const group = await findGroup(groupId);
       if (group.id === HOME_GROUP) throw new Error("The home group can't be removed.");
       const { packagesRepo } = await readConfig();
