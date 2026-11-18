@@ -1,7 +1,8 @@
 # bb-plugin-server-badge
 
 Shows whether a window is connected to the **Development** or **Production**
-bb server, as a small badge in the bottom-right corner. On a personal machine
+bb server, as a small badge in the bottom-right corner that reads `Dev server`
+or `Prod server`. On a personal machine
 (no public app URL) it shows `user:machine:port` instead. It never gets in the
 way: clicks go straight through it, and it fades out while the mouse is near.
 Run `bb server-badge` for the server's name, host, user, port, app URL, and why

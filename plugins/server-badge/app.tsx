@@ -1,5 +1,5 @@
 // Server Badge frontend: a small fixed pill in the bottom-right corner that
-// says Development or Production, or user:machine:port on a personal machine.
+// says Dev server or Prod server, or user:machine:port on a personal machine.
 //
 // It never gets in the way: it ignores the mouse entirely (clicks go to
 // whatever is behind it) and fades out while the cursor is near it.
@@ -59,7 +59,8 @@ function ServerBadge() {
 
   if (!info) return null;
   // Just the environment; a personal machine (Local) shows user:machine:port.
-  const text = info.environment === "Local" ? `${info.user}:${info.hostname}:${info.port}` : info.environment;
+  const text =
+    info.environment === "Local" ? `${info.user}:${info.hostname}:${info.port}` : info.environment === "Development" ? "Dev server" : "Prod server";
   return (
     <div
       ref={badge}
