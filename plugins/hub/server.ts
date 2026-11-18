@@ -1055,8 +1055,8 @@ export default async function plugin(bb: BbPluginApi) {
       } else {
         await git(["fetch", "--quiet", "origin"], dir);
       }
-      const current = (await git(["rev-parse", "HEAD"], dir).catch(() => "")).trim();
-      if (current !== head) await git(["checkout", "--quiet", "--force", "--detach", head], dir);
+      // Always (a fresh --no-checkout clone already points at the commit but has no files).
+      await git(["checkout", "--quiet", "--force", "--detach", head], dir);
       const workspaces = await readWorkspaces(dir);
       const rootKey = `follow-root:${key}`;
       const rootAt = (await bb.storage.kv.get<string>(rootKey)) ?? null;
