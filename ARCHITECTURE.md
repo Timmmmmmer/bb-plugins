@@ -12,6 +12,41 @@ plugins kept once in the repository, in one of three lists: **local**
 **marketplace** (entries in a bb marketplace). Each bb server's hub
 installs everything its groups reference. Home is always on.
 
+### At a glance
+
+```mermaid
+flowchart LR
+  subgraph Machines["bb servers, one hub each"]
+    direction TB
+    Tim["Tim's bb server<br/>groups: Home + ensembleWorks"]
+    New["New user<br/>groups: Home"]
+  end
+
+  subgraph Repo["Hub repo: github.com/Timmmmmmer/bb-plugins"]
+    direction TB
+    Groups["Groups<br/>lists of ✱ references"]
+    Local["Local plugins<br/>folders in this repo"]
+    Remote["Remote and followed plugins<br/>pointers to other repos"]
+    Market["Marketplace plugins<br/>catalog entries"]
+  end
+
+  subgraph Sources["Where they come from"]
+    direction TB
+    Other["Other public GitHub repos"]
+    BBM["bb marketplaces"]
+  end
+
+  Tim -- subscribes --> Groups
+  New -- subscribes --> Groups
+  Groups -. "✱" .-> Local
+  Groups -. "✱" .-> Remote
+  Groups -. "✱" .-> Market
+  Remote --> Other
+  Market --> BBM
+```
+
+### With every group and plugin
+
 ```mermaid
 flowchart LR
   subgraph Machines["bb servers, one hub each"]
