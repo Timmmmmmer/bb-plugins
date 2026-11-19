@@ -7,5 +7,10 @@
   "exclude": [],
   "remote": [],
   "uninstall": [],
-  "marketplace": []
+  "marketplace": [
+    {
+      "id": "dashboards",
+      "marketplace": "bb-community"
+    }
+  ]
 }
