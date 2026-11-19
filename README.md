@@ -83,7 +83,8 @@ Best for team plugins that live in this repository.
    start developing one there by entering its folder and clicking
    **Develop**, which is `bb hub dev <folder>`). The same controls are also one
    click away under the **Publish** button in the left sidebar's footer (next
-   to Settings; it works with BB Sidebar too). It copies the
+   to Settings; it works with BB Sidebar too), or press **F8** to open it
+   (change the key under Settings → Keyboard). It copies the
    folder into the group's `plugins/<name>` and pushes. It refuses unless
    `version` in `package.json` is newer than the published copy, and lists
    what changed. Every hub in the group gets it at the next sync (within 15

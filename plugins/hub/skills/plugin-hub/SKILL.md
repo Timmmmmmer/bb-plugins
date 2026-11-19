@@ -244,7 +244,9 @@ Plugins installed from git before that keep their git install; joining a beta
 for one needs `--reset-data` (one reinstall, data reset). Plugins a machine
 runs from its own folder (`bb plugin install .`) are left alone and listed on
 the page under **Your local plugins** with Publish buttons, and under the
-**Publish** button in the left sidebar's footer.
+**Publish** button in the left sidebar's footer (F8 toggles it: the command
+"Plugin hub: open or close the Publish panel", rebindable under Settings →
+Keyboard; F5-F9 are reserved for users in Emacs, so it doesn't clash).
 
 ### Moving between groups
 

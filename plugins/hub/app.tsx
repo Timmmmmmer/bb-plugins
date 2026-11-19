@@ -94,8 +94,8 @@ function WriteBanner({ data, busy, rpc, run }: { data: HubData; busy: string | n
 }
 
 const PROBLEM: SyncResult["outcome"][] = ["failed", "other-source"];
-/** Red for a failure, a muted orange (orange blended with the muted text colour in OKLab, so the hue stays orange) for a plugin installed from another source. */
-const WARNING_TEXT = "text-[color-mix(in_oklab,var(--color-orange-500)_65%,var(--muted-foreground))]";
+/** Red for a failure, a yellow warning (yellow blended with the muted text colour in OKLab, so it stays yellow but readable) for a plugin installed from another source. */
+const WARNING_TEXT = "text-[color-mix(in_oklab,var(--color-yellow-500)_75%,var(--muted-foreground))]";
 const outcomeClass = (outcome: SyncResult["outcome"] | null) =>
   outcome === "failed" ? "text-destructive" : outcome === "other-source" ? WARNING_TEXT : "text-muted-foreground";
 const groupClass = (status: GroupView["status"] | undefined) => (status === "error" ? "text-destructive" : status === "warning" ? WARNING_TEXT : undefined);
@@ -149,7 +149,8 @@ function Row({
             </Button>
           )}
         </span>
-        <span className={cn("shrink-0 text-xs", outcomeClass(result?.outcome ?? null))}>
+        <span className={cn("inline-flex shrink-0 items-center gap-1 text-xs", outcomeClass(result?.outcome ?? null))}>
+          {result?.outcome === "other-source" && statusText === undefined ? <Glyph name="AlertTriangle" className="size-3" /> : null}
           {status}
         </span>
         {action}
@@ -1346,13 +1347,21 @@ function PublishFooter() {
 }
 
 export default definePluginApp((app) => {
-  app.experimental_sidebarFooter.register({
+  const publishPanel = app.experimental_sidebarFooter.register({
     kind: "disclosure",
     id: "publish",
-    label: "Publish your plugins (Plugin hub)",
+    label: "Publish your plugins (Plugin hub, F8)",
     // The hub's own icon (bb.branding.experimental_icons): bb's icon set has no upload icon.
     icon: "hub/publish",
     component: PublishFooter,
+  });
+  // F8: Emacs reserves F5-F9 for users (Emacs and its packages don't bind
+  // them), and bb doesn't use it. Rebind under Settings → Keyboard.
+  app.commands.register({
+    id: "toggle-publish",
+    title: "Plugin hub: open or close the Publish panel",
+    defaultShortcut: { key: "F8" },
+    run: () => publishPanel.toggle(),
   });
   app.slots.navPanel({ id: "plugin-hub", title: "Plugin hub", icon: "hub/hub", path: "plugin-hub", component: HubPage });
 });
