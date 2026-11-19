@@ -4,7 +4,88 @@ How the shared plugin repository, the **hub** plugin, and bb fit together.
 Everything is public and token-free: hubs read anonymously, and the only
 writes are pushes made with a member's own git login.
 
-## Overview
+## Overview: who installs what
+
+Groups don't hold plugins themselves: each one lists references (✱) to
+plugins kept once in the repository, in one of three lists: **local**
+(folders here), **remote/followed** (pointers to other public repos), and
+**marketplace** (entries in a bb marketplace). Each bb server's hub
+installs everything its groups reference. Home is always on.
+
+```mermaid
+flowchart LR
+  subgraph Machines["bb servers, one hub each"]
+    direction TB
+    Tim["Tim's bb server<br/>groups: Home + ensembleWorks"]
+    New["New user<br/>groups: Home<br/>(the Hub is the first install)"]
+  end
+
+  subgraph Repo["Hub repo: github.com/Timmmmmmer/bb-plugins"]
+    direction TB
+    subgraph Groups["Groups (lists of ✱ references)"]
+      Home["Home"]
+      Dev["Lean Software Developers"]
+      EW["ensembleWorks"]
+      MDL["mrdavidlaing"]
+      Test["test group"]
+      Student["Lean Software Student Course 1<br/>(empty)"]
+    end
+    subgraph Local["Local plugins: folders in this repo"]
+      Hub["plugins/hub"]
+      Hello["plugins/hello"]
+      SText["plugins/sidebar-text"]
+      Badge["plugins/server-badge"]
+      HubTest["groups/test-group/plugins/hub-test"]
+    end
+    subgraph Remote["Remote and followed plugins: pointers"]
+      EWFollow["follow: lean-software-production/ensembleworks"]
+    end
+    subgraph Market["Marketplace plugins: catalog entries"]
+      Sidebar["bb-sidebar@bb-community"]
+      More["breathe, turn-tps, linear<br/>@bb-community"]
+    end
+  end
+
+  subgraph Sources["Where they come from"]
+    direction TB
+    EWRepo["github.com/lean-software-production/ensembleworks<br/>canvas, attractor, fabro, huddle,<br/>identity, communications-hub"]
+    BBM["bb marketplaces<br/>bb-community, bb-official, third-party"]
+  end
+
+  Tim -- subscribes --> Home
+  Tim -- subscribes --> EW
+  New -- subscribes --> Home
+
+  Home -. "✱" .-> Hub
+  Home -. "✱" .-> Hello
+  Home -. "✱" .-> SText
+  Home -. "✱" .-> Sidebar
+  Dev -. "✱" .-> Badge
+  EW -. "✱" .-> EWFollow
+  MDL -. "✱" .-> Sidebar
+  MDL -. "✱" .-> More
+  Test -. "✱" .-> HubTest
+
+  EWFollow -- "every plugin folder" --> EWRepo
+  Sidebar --> BBM
+  More --> BBM
+```
+
+### How does bb install plugins from different marketplaces?
+
+bb keeps a list of marketplaces under **Settings → Plugin marketplaces**:
+the built-in **bb-official** and **bb-community**, plus any third-party one
+(a `marketplace.json` in a git repository or at a URL). A marketplace entry
+is `<id>@<marketplace>`. For a third-party marketplace, `packages.json` also
+stores where to add it from (`source`), so each hub registers that
+marketplace on machines that don't have it yet. bb then resolves the entry to
+its real source (a git tag or npm version), shows its compatibility, and
+installs it as a background job; the hub keeps it updated with bb's own
+update check. This repository is a marketplace too: each group has a
+generated `marketplace.json`, and the hub registers the ones a machine
+subscribes to, so the team's plugins also show up in bb's plugin store.
+
+## Inside one machine
 
 ```mermaid
 flowchart LR
