@@ -26,6 +26,11 @@
       "id": "test-group",
       "name": "test group",
       "path": "groups/test-group"
+    },
+    {
+      "id": "test-group-2",
+      "name": "Test group 2",
+      "path": "groups/test-group-2"
     }
   ],
   "syncIntervalMinutes": 15,
