@@ -12,6 +12,8 @@ installs them and keeps them up to date on every member's machine.
 The repository is public, so nothing needs a GitHub token.
 
 - **Join:** see [JOIN.md](JOIN.md). It's one command.
+- **How it works:** see [ARCHITECTURE.md](ARCHITECTURE.md) for diagrams of the
+  repository, the hub, a sync, and a change.
 - **Groups:** the repository root is the **Home** group, which everyone gets.
   [`groups/lean-software-developers`](groups/lean-software-developers) and
   [`groups/lean-software-student`](groups/lean-software-student) are extra
