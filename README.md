@@ -39,7 +39,9 @@ The repository is public, so nothing needs a GitHub token.
   - a folder or `.zip`/`.tar` (file, URL, or dropped on the page) is copied in
     as a **local plugin**.
 
-  It pushes with the bb machine's own git login. You can also add a local
+  It pushes with the bb machine's own git login. If that login can't push to
+  this repository, the Plugin hub page says so (and how to fix it) and greys
+  out every button that would change the repository. You can also add a local
   plugin by uploading its folder into `plugins/` on GitHub, or with
   `scripts/add-plugin.sh <folder | .zip>`. `bb hub plugin remove <repo>` stops
   pointing to a remote plugin. Delete a local plugin's folder (or add it to

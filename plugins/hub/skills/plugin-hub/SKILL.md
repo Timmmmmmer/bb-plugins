@@ -210,6 +210,19 @@ never switched automatically, because switching reinstalls it and resets its
 data. A group's `uninstall` list only removes plugins installed from that
 group's own folders.
 
+### Write access
+
+Changes to the shared repository push with this machine's own git login. The
+hub checks that login with a dry-run push (to a branch that is never created)
+after syncs, caching the answer for 10 minutes; a failed push updates it too.
+When it can't push, the Plugin hub page (and the sidebar footer's Publish
+panel) shows why and how to fix it (`gh auth login`, `gh auth setup-git`),
+with a Check again button, and greys out every button that changes the
+repository: adding, renaming and removing groups, moving, deleting and
+removing plugins, adding plugins (including from the marketplace), publishing
+and promoting. Installing, syncing, subscribing, betas and developing still
+work.
+
 ### Publishing, betas, promoting
 
 ```sh

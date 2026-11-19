@@ -2,10 +2,10 @@
 //
 // Order: packages, marketplace plugins, sync time, one box to add a plugin
 // (drop a folder or .zip, or paste a URL), then search to add from a marketplace.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { DragEvent, FormEvent, ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
-import type { BetaView, DevPlugin, PackageView, PluginFolder, rpcContract, Schedule, SyncReport, SyncResult } from "./server";
+import type { BetaView, DevPlugin, PackageView, PluginFolder, rpcContract, Schedule, SyncReport, SyncResult, WriteAccess } from "./server";
 import { Button } from "@/components/ui/button";
 import { Glyph } from "@/components/glyph";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,7 @@ type HubData = {
   marketplace: MarketplaceView[];
   betas: BetaView[];
   devPlugins: DevPlugin[];
+  write: WriteAccess;
   lastSync: SyncReport | null;
   schedule: Schedule;
   hubVersion: string | null;
@@ -58,6 +59,37 @@ function Spinner({ children }: { children: ReactNode }) {
       <Glyph name="RefreshCw" className="size-3.5 animate-spin" />
       {children}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Write access: buttons that change the shared repository are greyed out when
+// this machine's git can't push to it.
+
+/** The reason this machine can't change the shared repository, or null when it can (or it isn't known yet). */
+const ReadOnly = createContext<string | null>(null);
+const useReadOnly = () => useContext(ReadOnly);
+const readOnlyReason = (data: HubData | null) =>
+  data !== null && data.write.canWrite === false ? `You can't change ${data.write.repo} from this machine: ${data.write.reason ?? "its git can't push there"}.` : null;
+const NEEDS_WRITE = "Needs write access to the shared repository";
+
+function WriteBanner({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
+  const reason = readOnlyReason(data);
+  if (reason === null) return null;
+  return (
+    <div role="alert" className={cn("mt-3 rounded-lg border border-border bg-card px-3 py-2 text-xs", WARNING_TEXT)}>
+      <p>
+        {reason} Buttons that change it are greyed out; installing, subscribing, betas, and developing still work.
+      </p>
+      <p className="mt-1 text-muted-foreground">
+        To fix it, sign this machine's git in with a GitHub account that can push to {data.write.repo} (for example{" "}
+        <code>gh auth login</code> and <code>gh auth setup-git</code>), then check again.
+      </p>
+      <Button size="sm" variant="ghost" className="mt-1 h-7 px-2" disabled={busy !== null} onClick={() => void run("writecheck", () => rpc.call("hub_check_write", null))}>
+        <Glyph name="RefreshCw" className={cn("size-3.5", busy === "writecheck" && "animate-spin")} />
+        Check again
+      </Button>
+    </div>
   );
 }
 
@@ -225,6 +257,7 @@ function GroupSelector({
   onSubscribed: (result: { group: string; subscribed: boolean }) => void;
 }) {
   const current = data.groups.find((group) => group.id === selected) ?? data.groups[0];
+  const readOnly = useReadOnly() !== null;
   const subscribing = current !== undefined && busy === `subscribe:${current.id}`;
   const [edit, setEdit] = useState<GroupEdit | null>(null);
   const [name, setName] = useState("");
@@ -288,12 +321,12 @@ function GroupSelector({
         )}
         <div className="flex shrink-0 items-center">
           {current === undefined ? null : (
-            <IconButton label="Rename group" glyph="Pencil" disabled={busy !== null || loading} onClick={() => open({ mode: "rename", group: current })} />
+            <IconButton label={readOnly ? `Rename group (${NEEDS_WRITE})` : "Rename group"} glyph="Pencil" disabled={busy !== null || loading || readOnly} onClick={() => open({ mode: "rename", group: current })} />
           )}
           {current === undefined || current.home ? null : (
-            <IconButton label="Remove group" glyph="Trash2" disabled={busy !== null || loading} onClick={() => open({ mode: "remove", group: current })} />
+            <IconButton label={readOnly ? `Remove group (${NEEDS_WRITE})` : "Remove group"} glyph="Trash2" disabled={busy !== null || loading || readOnly} onClick={() => open({ mode: "remove", group: current })} />
           )}
-          <IconButton label="Add a group" glyph="Plus" disabled={busy !== null} onClick={() => open({ mode: "add" })} />
+          <IconButton label={readOnly ? `Add a group (${NEEDS_WRITE})` : "Add a group"} glyph="Plus" disabled={busy !== null || readOnly} onClick={() => open({ mode: "add" })} />
         </div>
       </div>
       {loading ? (
@@ -374,14 +407,15 @@ function GroupSelector({
 type MoveTarget = { kind: "local" | "remote" | "marketplace"; ref: string; path?: string; name: string };
 
 function MoveButton({ name, busy, onClick, disabled }: { name: string; busy: string | null; onClick: () => void; disabled?: boolean }) {
+  const readOnly = useReadOnly() !== null;
   return (
-    <span title="Move to another group" className="inline-flex">
+    <span title={readOnly ? NEEDS_WRITE : "Move to another group"} className="inline-flex">
     <Button
       variant="ghost"
       size="icon"
       className="size-6 text-muted-foreground hover:text-foreground"
       aria-label={`Move ${name} to another group`}
-      disabled={busy !== null || disabled}
+      disabled={busy !== null || disabled || readOnly}
       onClick={onClick}
     >
       <Glyph name="ArrowLeftRight" className="size-3.5" />
@@ -469,6 +503,7 @@ function MoveDialog({
 }
 
 function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
+  const readOnly = useReadOnly() !== null;
   const nameFor = (entry: PackageView) => entry.info?.name ?? entry.label;
   const [confirm, setConfirm] = useState<PackageView | null>(null);
   const [moving, setMoving] = useState<MoveTarget | null>(null);
@@ -514,7 +549,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
                     size="icon"
                     className="size-6 text-muted-foreground hover:text-foreground"
                     aria-label={`Remove ${entry.label}`}
-                    disabled={busy !== null}
+                    disabled={busy !== null || readOnly}
                     onClick={() =>
                       void run(`rremove:${entry.label}`, () =>
                         rpc.call("hub_remote_remove", { repo: entry.repo, ...(entry.path ? { path: entry.path } : {}), group: data.group.id }),
@@ -529,7 +564,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
                     size="icon"
                     className="size-6 text-muted-foreground hover:text-destructive"
                     aria-label={`Delete ${nameFor(entry)}`}
-                    disabled={busy !== null}
+                    disabled={busy !== null || readOnly}
                     onClick={() => setConfirm(entry)}
                   >
                     <Glyph name="Trash2" className="size-3.5" />
@@ -575,6 +610,7 @@ function Plugins({ data, busy, rpc, run }: { data: HubData; busy: string | null;
 }
 
 function MarketplacePlugins({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
+  const readOnly = useReadOnly() !== null;
   const resultFor = (label: string) => data.lastSync?.results.find((result) => result.repo === label) ?? null;
   const [moving, setMoving] = useState<MoveTarget | null>(null);
   return (
@@ -605,7 +641,7 @@ function MarketplacePlugins({ data, busy, rpc, run }: { data: HubData; busy: str
                     size="icon"
                     className="size-6 text-muted-foreground hover:text-foreground"
                     aria-label={`Remove ${item.entry}`}
-                    disabled={busy !== null}
+                    disabled={busy !== null || readOnly}
                     onClick={() => void run(`mremove:${item.entry}`, () => rpc.call("hub_marketplace_remove", { entry: item.entry, group: data.group.id }))}
                   >
                     <Glyph name="X" className="size-3.5" />
@@ -678,6 +714,7 @@ function compareVersions(a: string | null, b: string | null): number {
 }
 
 function Betas({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
+  const readOnly = useReadOnly() !== null;
   const [confirmReset, setConfirmReset] = useState<BetaView | null>(null);
   if (data.betas.length === 0) return null;
   const toggle = (beta: BetaView, resetData = false) =>
@@ -704,12 +741,12 @@ function Betas({ data, busy, rpc, run }: { data: HubData; busy: string | null; r
             >
               {busy === `beta:${beta.pluginId}` ? "…" : beta.joined ? "Leave beta" : "Join beta"}
             </Button>
-            <span title="Make this beta the stable copy for everyone" className="inline-flex">
+            <span title={readOnly ? NEEDS_WRITE : "Make this beta the stable copy for everyone"} className="inline-flex">
               <Button
                 size="sm"
                 variant="ghost"
                 className="h-7 shrink-0 text-muted-foreground"
-                disabled={busy !== null}
+                disabled={busy !== null || readOnly}
                 onClick={() => void run(`promote:${beta.pluginId}`, () => rpc.call("hub_promote", { plugin: beta.pluginId, group: data.group.id }))}
               >
                 {busy === `promote:${beta.pluginId}` ? "…" : "Promote"}
@@ -768,6 +805,7 @@ function DevPlugins({
   const [target, setTarget] = useState<PublishTarget | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [folder, setFolder] = useState("");
+  const readOnly = useReadOnly() !== null;
   const blocker = (plugin: DevPlugin, beta: boolean): string | null => {
     const published = beta ? plugin.betaVersion : plugin.stableVersion;
     if (published !== null && compareVersions(plugin.version, published) <= 0) return `Bump the version: ${plugin.version ?? "?"} isn't newer than the published ${published}.`;
@@ -801,12 +839,12 @@ function DevPlugins({
                 [true, "Publish beta"],
               ] as const
             ).map(([beta, label]) => (
-              <span key={label} title={blocker(plugin, beta) ?? `${label} ${plugin.version ?? ""} to ${data.group.name}`} className="inline-flex">
+              <span key={label} title={readOnly ? NEEDS_WRITE : blocker(plugin, beta) ?? `${label} ${plugin.version ?? ""} to ${data.group.name}`} className="inline-flex">
                 <Button
                   size="sm"
                   variant={beta ? "ghost" : "default"}
                   className="h-7 shrink-0"
-                  disabled={busy !== null || blocker(plugin, beta) !== null}
+                  disabled={busy !== null || readOnly || blocker(plugin, beta) !== null}
                   onClick={() => setTarget({ plugin, beta })}
                 >
                   {beta ? null : <Glyph name="Upload" className="size-3.5" />}
@@ -945,6 +983,7 @@ function AddPlugin({ busy, rpc, run, group }: { busy: string | null; rpc: Rpc; r
   const [over, setOver] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
+  const readOnly = useReadOnly() !== null;
 
   const add = (input: Parameters<Rpc["call"]>[1] & object) =>
     run("add", async () => {
@@ -973,6 +1012,7 @@ function AddPlugin({ busy, rpc, run, group }: { busy: string | null; rpc: Rpc; r
     event.preventDefault();
     setOver(false);
     if (busy !== null) return;
+    if (readOnly) return setMessage(NEEDS_WRITE);
     const item = event.dataTransfer.items[0];
     const entry = (item?.webkitGetAsEntry?.() ?? null) as unknown as Entry | null;
     if (entry?.isDirectory) return addFiles(await readDroppedFolder(entry as unknown as DirEntry));
@@ -1012,10 +1052,10 @@ function AddPlugin({ busy, rpc, run, group }: { busy: string | null; rpc: Rpc; r
             aria-label="Plugin link"
             className="h-8"
           />
-          <Button type="submit" size="sm" disabled={busy !== null || url.trim() === ""}>
+          <Button type="submit" size="sm" disabled={busy !== null || readOnly || url.trim() === ""}>
             {busy === "add" ? "Adding…" : "Add"}
           </Button>
-          <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0" aria-label="Choose a .zip" onClick={() => picker.current?.click()}>
+          <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0" aria-label="Choose a .zip" disabled={readOnly} onClick={() => picker.current?.click()}>
             <Glyph name="Paperclip" className="size-4" />
           </Button>
           <input
@@ -1047,6 +1087,7 @@ type SearchResult = { entry: string; displayName: string; description: string; i
 function AddFromMarketplace({ data, busy, rpc, run }: { data: HubData; busy: string | null; rpc: Rpc; run: Run }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[] | null>(null);
+  const readOnly = useReadOnly() !== null;
   const listed = new Set(data.marketplace.map((item) => item.entry));
   return (
     <>
@@ -1078,7 +1119,7 @@ function AddFromMarketplace({ data, busy, rpc, run }: { data: HubData; busy: str
                     size="sm"
                     variant="ghost"
                     className="h-6 px-2"
-                    disabled={busy !== null || !result.compatible}
+                    disabled={busy !== null || readOnly || !result.compatible}
                     onClick={() => void run(`madd:${result.entry}`, () => rpc.call("hub_marketplace_add", { entry: result.entry, group: data.group.id }))}
                   >
                     {busy === `madd:${result.entry}` ? "Adding…" : result.compatible ? "Add" : "Incompatible"}
@@ -1212,7 +1253,8 @@ function HubPage() {
             <Spinner>{updating ? "Updating the hub…" : "Loading…"}</Spinner>
           </p>
         ) : (
-          <>
+          <ReadOnly.Provider value={readOnlyReason(data)}>
+            <WriteBanner data={data} busy={busy} rpc={rpc} run={run} />
             <GroupSelector data={data} selected={group} onSelect={selectGroup} busy={busy} rpc={rpc} run={run} loading={loading} syncing={syncing} onSubscribed={onSubscribed} />
             <div className={cn("transition-opacity", loading && "pointer-events-none opacity-40")} aria-busy={loading}>
               <Plugins data={data} busy={busy} rpc={rpc} run={run} />
@@ -1223,7 +1265,7 @@ function HubPage() {
               <AddPlugin busy={busy} rpc={rpc} run={run} group={data.group} />
               <AddFromMarketplace data={data} busy={busy} rpc={rpc} run={run} />
             </div>
-          </>
+          </ReadOnly.Provider>
         )}
       </div>
     </div>
@@ -1279,7 +1321,8 @@ function PublishFooter() {
       {data === null ? (
         <Spinner>Loading…</Spinner>
       ) : (
-        <>
+        <ReadOnly.Provider value={readOnlyReason(data)}>
+          <WriteBanner data={data} busy={busy} rpc={rpc} run={run} />
           <label className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
             Publish to
             <select
@@ -1296,7 +1339,7 @@ function PublishFooter() {
             </select>
           </label>
           <DevPlugins data={data} busy={busy} rpc={rpc} run={run} inSidePanel />
-        </>
+        </ReadOnly.Provider>
       )}
     </div>
   );

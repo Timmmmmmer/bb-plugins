@@ -366,6 +366,15 @@ const publishOutputSchema = z.object({
   sync: syncResultSchema.nullable(),
 });
 
+/** Whether this machine's git can push to the shared repository (canWrite null: not known yet, or the check couldn't run). */
+const writeAccessSchema = z.object({
+  canWrite: z.boolean().nullable(),
+  reason: z.string().nullable(),
+  repo: z.string(),
+  checkedAt: z.string().nullable(),
+});
+export type WriteAccess = z.infer<typeof writeAccessSchema>;
+
 export const rpcContract = defineRpcContract({
   hub_list: {
     input: z.object({ group: z.string().trim().max(64).optional() }).nullable(),
@@ -410,6 +419,7 @@ export const rpcContract = defineRpcContract({
       betas: z.array(betaViewSchema),
       /** Plugins this machine runs from its own folders (being developed), with what the group has published. */
       devPlugins: z.array(devPluginSchema),
+      write: writeAccessSchema,
       lastSync: syncReportSchema.nullable(),
       schedule: scheduleSchema,
       hubVersion: z.string().nullable(),
@@ -423,7 +433,13 @@ export const rpcContract = defineRpcContract({
       syncing: z.object({ trigger: z.string(), startedAt: z.string() }).nullable(),
       /** The hub is updating itself: applying (the old hub started it) or finishing (the new hub's first sync). */
       updating: z.object({ phase: z.enum(["applying", "finishing"]), to: z.string().nullable() }).nullable(),
+      write: writeAccessSchema,
     }),
+  },
+  /** Check again whether this machine can push to the shared repository. */
+  hub_check_write: {
+    input: z.null(),
+    output: writeAccessSchema,
   },
   hub_install: {
     input: z.object({ path: z.string().min(1).max(200) }),
@@ -2396,6 +2412,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     bb.realtime.publish(HUB_CHANGED, { sync: report.at });
     firstSyncDone = true;
+    void checkWriteAccess();
     if (startSelfUpdate) {
       selfUpdateStarted = true;
       bb.realtime.publish(HUB_CHANGED, { updating: true });
@@ -2411,6 +2428,49 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   let syncing: { trigger: string; startedAt: string } | null = null;
+
+  // -------------------------------------------------------------------------
+  // Write access to the shared repository: a dry-run push (to a branch that
+  // is never created) with this machine's git login, from the read-only
+  // mirror, cached for a while. Pushing for real updates it too.
+
+  const WRITE_CHECK_TTL_MS = 10 * 60_000;
+  let writeAccess: { canWrite: boolean | null; reason: string | null; checkedAt: string | null } = { canWrite: null, reason: null, checkedAt: null };
+  let writeCheck: Promise<unknown> | null = null;
+  const writeView = async (): Promise<WriteAccess> => {
+    const repo = await readConfig().then((config) => repoDisplay(config.packagesRepo), () => "the shared repository");
+    return { ...writeAccess, repo };
+  };
+  const explainPushFailure = (message: string, repo: string): { canWrite: boolean | null; reason: string } => {
+    const denied = message.match(/Permission to \S+ denied to ([^.\s]+)/u);
+    if (denied) return { canWrite: false, reason: `the GitHub account ${denied[1]} that this machine's git uses can't push to ${repo}` };
+    if (/could not read Username|terminal prompts disabled|Authentication failed|invalid username or password/iu.test(message)) {
+      return { canWrite: false, reason: `this machine's git has no GitHub login that can push to ${repo}` };
+    }
+    if (/403|denied|not allowed|forbidden/iu.test(message)) return { canWrite: false, reason: `pushing to ${repo} is not allowed for this machine's git login (${message.slice(0, 160)})` };
+    return { canWrite: null, reason: `couldn't check (${message.slice(0, 160)})` };
+  };
+  function checkWriteAccess(force = false): Promise<unknown> {
+    if (!force && writeAccess.checkedAt !== null && Date.now() - Date.parse(writeAccess.checkedAt) < WRITE_CHECK_TTL_MS) return Promise.resolve();
+    writeCheck ??= (async () => {
+      const { packagesRepo } = await readConfig();
+      const mirror = await syncMirror(packagesRepo);
+      const before = writeAccess.canWrite;
+      try {
+        await gitWithMachineCredentials(["push", "--dry-run", "--quiet", repoUrl(packagesRepo), "HEAD:refs/heads/bb-hub-write-check"], mirror);
+        writeAccess = { canWrite: true, reason: null, checkedAt: new Date().toISOString() };
+      } catch (cause) {
+        writeAccess = { ...explainPushFailure(errorMessage(cause), repoDisplay(packagesRepo)), checkedAt: new Date().toISOString() };
+      }
+      if (writeAccess.canWrite !== before) {
+        bb.log.info(`write access to ${repoDisplay(packagesRepo)}: ${writeAccess.canWrite === null ? "unknown" : writeAccess.canWrite ? "yes" : "no"}${writeAccess.reason ? ` (${writeAccess.reason})` : ""}`);
+        bb.realtime.publish(HUB_CHANGED, { write: writeAccess.canWrite });
+      }
+    })().catch((cause) => bb.log.warn(`write check failed: ${errorMessage(cause)}`)).finally(() => {
+      writeCheck = null;
+    });
+    return writeCheck;
+  }
   const instanceStartedAt = Date.now();
   let selfUpdateStarted = false;
   let firstSyncDone = false;
@@ -2846,10 +2906,16 @@ export default async function plugin(bb: BbPluginApi) {
       ? []
       : ["-c", "user.name=bb hub", "-c", "user.email=bb-hub@users.noreply.github.com"];
     await git([...identity, "commit", "--quiet", "-m", message, "--", ...paths], work);
-    const pushFailed = (cause: unknown) =>
-      new Error(
+    const pushFailed = (cause: unknown) => {
+      const explained = explainPushFailure(errorMessage(cause), `${repo.owner}/${repo.name}`);
+      if (explained.canWrite === false) {
+        writeAccess = { ...explained, checkedAt: new Date().toISOString() };
+        bb.realtime.publish(HUB_CHANGED, { write: false });
+      }
+      return new Error(
         `Pushing to ${repo.owner}/${repo.name} failed: ${errorMessage(cause)}. Changing the shared repository needs this machine's git to have write access to it (for example \`gh auth setup-git\`).`,
       );
+    };
     try {
       await gitWithMachineCredentials(["push", "--quiet", "origin", "HEAD"], work);
     } catch (first) {
@@ -3189,11 +3255,18 @@ export default async function plugin(bb: BbPluginApi) {
       clientOnly(context, "hub_list");
       const lastSync = (await bb.storage.kv.get<SyncReport>(LAST_SYNC_KEY)) ?? null;
       const self = (await bb.sdk.plugins.list()).plugins.find((plugin) => plugin.id === bb.pluginId);
-      return { ...(await listHub(input?.group)), lastSync, schedule: scheduleView(lastSync), hubVersion: self?.version ?? null };
+      void checkWriteAccess();
+      return { ...(await listHub(input?.group)), lastSync, write: await writeView(), schedule: scheduleView(lastSync), hubVersion: self?.version ?? null };
     },
     hub_status: (_input, context) => {
       clientOnly(context, "hub_status");
-      return updatingView().then((updating) => ({ syncing, updating }));
+      void checkWriteAccess();
+      return Promise.all([updatingView(), writeView()]).then(([updating, write]) => ({ syncing, updating, write }));
+    },
+    hub_check_write: async (_input, context) => {
+      clientOnly(context, "hub_check_write");
+      await checkWriteAccess(true);
+      return writeView();
     },
     hub_move: ({ kind, ref, path: folder, from, to }, context) => {
       clientOnly(context, "hub_move");
