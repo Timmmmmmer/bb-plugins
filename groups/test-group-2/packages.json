@@ -7,10 +7,5 @@
   "exclude": [],
   "remote": [],
   "uninstall": [],
-  "marketplace": [
-    {
-      "id": "ai-usage",
-      "marketplace": "bb-community"
-    }
-  ]
+  "marketplace": []
 }
