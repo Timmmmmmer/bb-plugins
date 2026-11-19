@@ -9,10 +9,6 @@
   "uninstall": [],
   "marketplace": [
     {
-      "id": "dashboards",
-      "marketplace": "bb-community"
-    },
-    {
       "id": "ai-usage",
       "marketplace": "bb-community"
     }
