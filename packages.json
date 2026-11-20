@@ -21,11 +21,6 @@
       "id": "ensembleworks",
       "name": "ensembleWorks",
       "path": "groups/ensembleworks"
-    },
-    {
-      "id": "test-group-2",
-      "name": "Test group 2",
-      "path": "groups/test-group-2"
     }
   ],
   "syncIntervalMinutes": 15,
