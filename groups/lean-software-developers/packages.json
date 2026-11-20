@@ -7,7 +7,12 @@
   "exclude": [],
   "remote": [],
   "uninstall": [],
-  "marketplace": [],
+  "marketplace": [
+    {
+      "id": "bb-sidebar",
+      "marketplace": "bb-community"
+    }
+  ],
   "local": [
     {
       "path": "plugins/server-badge"

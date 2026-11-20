@@ -39,10 +39,5 @@
   ],
   "remote": [],
   "uninstall": [],
-  "marketplace": [
-    {
-      "id": "bb-sidebar",
-      "marketplace": "bb-community"
-    }
-  ]
+  "marketplace": []
 }
