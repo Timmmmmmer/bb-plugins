@@ -6,7 +6,9 @@
   ],
   "exclude": [],
   "remote": [],
-  "uninstall": [],
+  "uninstall": [
+    "hello"
+  ],
   "marketplace": [
     {
       "id": "bb-sidebar",
@@ -14,9 +16,6 @@
     }
   ],
   "local": [
-    {
-      "path": "plugins/hello"
-    },
     {
       "path": "plugins/sidebar-text"
     }
