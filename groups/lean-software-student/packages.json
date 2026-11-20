@@ -5,7 +5,11 @@
     "plugins/*"
   ],
   "exclude": [],
-  "remote": [],
+  "remote": [
+    {
+      "repo": "lean-software-production/bb-plugin-tutor"
+    }
+  ],
   "uninstall": [],
   "marketplace": []
 }
