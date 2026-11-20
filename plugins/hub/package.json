@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-hub",
-  "version": "2.10.1",
+  "version": "2.10.2",
   "type": "module",
   "engines": {
     "bb": ">=0.47.1",

@@ -242,7 +242,29 @@ function parseRepoInput(input: string): { repo: RepoRef; path: string | null; re
   return { repo: { owner, name, url: `https://${url.host}${url.pathname.replace(/\/+$/u, "")}` }, path: null, ref: null };
 }
 const parseRepo = (input: string): RepoRef => parseRepoInput(input).repo;
-const repoKey = (repo: RepoRef) => repo.url.toLowerCase().replace(/\.git$/u, "");
+/**
+ * Repositories that are one repository under several names (a transfer or
+ * rename: GitHub redirects the old URL, and installs keep the URL they were
+ * made with). The first name is the key everything is stored under, so
+ * moving the repository changes no stored state.
+ */
+const REPO_ALIASES: string[][] = [
+  ["https://github.com/timmmmmmer/bb-plugins", "https://github.com/lean-software-production/bb-plugins"],
+];
+const plainRepoKey = (url: string) => url.toLowerCase().replace(/\/+$/u, "").replace(/\.git$/u, "");
+const repoKey = (repo: RepoRef) => {
+  const key = plainRepoKey(repo.url);
+  return REPO_ALIASES.find((names) => names.includes(key))?.[0] ?? key;
+};
+/** The repository and its other names, as RepoRefs. */
+const repoAndAliases = (repo: RepoRef): RepoRef[] => {
+  const names = REPO_ALIASES.find((group) => group.includes(plainRepoKey(repo.url)));
+  if (names === undefined) return [repo];
+  return [repo, ...names.filter((name) => name !== plainRepoKey(repo.url)).map((name) => {
+    const [owner = "", repoName = ""] = name.replace(/^https:\/\/github\.com\//u, "").split("/");
+    return { owner, name: repoName, url: `${name}.git` };
+  })];
+};
 const repoUrl = (repo: RepoRef) => repo.url;
 const repoDisplay = (repo: RepoRef) =>
   repo.url.toLowerCase().startsWith("https://github.com/") ? `${repo.owner}/${repo.name}` : repo.url;
@@ -918,10 +940,10 @@ export default async function plugin(bb: BbPluginApi) {
       ? `${spec.path}${spec.ref ? `@${spec.ref}` : ""}${spec.beta ? " (beta)" : ""}`
       : `${repoDisplay(spec)}${spec.path ? `/${spec.path}` : ""}${spec.ref ? `@${spec.ref}` : ""}${spec.follow ? " (followed)" : ""}`;
   const sourceFor = (spec: PackageSpec) => `git:${repoUrl(spec)}${spec.ref ? `@${spec.ref}` : ""}`;
-  const isHubSource = (installedSource: string, spec: PackageSpec) => {
-    const base = `git:${repoUrl(spec)}`.toLowerCase();
-    const source = installedSource.toLowerCase();
-    return source === base || source.startsWith(`${base}@`);
+  /** Whether an installed git source is this repository (under any of its names), with or without a ref. */
+  const isHubSource = (installedSource: string, spec: RepoRef) => {
+    const url = installedSource.match(/^git:(https:\/\/[^@\s]+)(?:@.*)?$/iu)?.[1];
+    return url !== undefined && repoKey({ owner: "", name: "", url }) === repoKey(spec);
   };
 
   function scheduleView(lastSync: SyncReport | null): Schedule {
@@ -2366,19 +2388,18 @@ export default async function plugin(bb: BbPluginApi) {
       // shared repository, and never while a package with that id is listed.
       const listedIds = new Set([...folderForId.keys(), ...results.map((result) => result.pluginId).filter((id): id is string => id !== null)]);
       const installedNow = (await bb.sdk.plugins.list()).plugins;
-      const sharedSource = `git:${repoUrl(packagesRepo)}`.toLowerCase();
+      const sharedCheckouts = await Promise.all(repoAndAliases(packagesRepo).map((repo) => checkoutDir(repo)));
       for (const packages of loaded) {
         for (const id of packages.uninstall) {
           if (id === bb.pluginId || listedIds.has(id)) continue;
           const plugin = installedNow.find((entry) => entry.id === id);
           if (plugin === undefined) continue;
-          const source = plugin.source.toLowerCase();
-          const sharedCheckout = await checkoutDir(packagesRepo);
-          const fromCheckout = path.resolve(plugin.rootDir).startsWith(`${sharedCheckout}${path.sep}`);
-          if (source !== sharedSource && !source.startsWith(`${sharedSource}@`) && !fromCheckout) continue;
+          const sharedCheckout = sharedCheckouts.find((dir) => path.resolve(plugin.rootDir).startsWith(`${dir}${path.sep}`));
+          const fromCheckout = sharedCheckout !== undefined;
+          if (!isHubSource(plugin.source, packagesRepo) && !fromCheckout) continue;
           // Only when the folder it was installed from is gone (it was deleted):
           // a folder that still exists belongs to another group's copy.
-          const folder = fromCheckout ? path.relative(sharedCheckout, plugin.rootDir).split(path.sep).join("/") : installedFolder(plugin);
+          const folder = sharedCheckout !== undefined ? path.relative(sharedCheckout, plugin.rootDir).split(path.sep).join("/") : installedFolder(plugin);
           if (folder !== null && (await git(["cat-file", "-e", `HEAD:${inFolder(folder, "package.json")}`], packagesDir).then(() => true, () => false))) continue;
           try {
             await bb.sdk.plugins.remove({ pluginId: id });
