@@ -9,7 +9,9 @@ installs them and keeps them up to date on every member's machine.
 | [`plugins/hello`](plugins/hello) | **Hello**: an example todo list (`bb hello`) |
 | [`plugins/sidebar-text`](plugins/sidebar-text) | **Sidebar text**: a sidebar page that shows a message |
 
-The repository is public, so nothing needs a GitHub token.
+The repository is public, so nothing needs a GitHub token. It moved here from
+`Timmmmmmer/bb-plugins`; the old address redirects, and existing installs keep
+working (don't create a new repository under the old name).
 
 - **Join:** see [JOIN.md](JOIN.md). It's one command.
 - **How it works:** see [ARCHITECTURE.md](ARCHITECTURE.md) for diagrams of the

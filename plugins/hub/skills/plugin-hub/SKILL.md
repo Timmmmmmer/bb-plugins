@@ -1,12 +1,12 @@
 ---
 name: plugin-hub
-description: Check, install, and update the team's bb plugins from the shared public repository (Timmmmmmer/bb-plugins) with the `bb hub` CLI. Use when the user asks which shared plugins are installed or available, to install, update, or adopt one, when a pushed change will reach everyone, or how to add or remove a shared package.
+description: Check, install, and update the team's bb plugins from the shared public repository (lean-software-production/bb-plugins) with the `bb hub` CLI. Use when the user asks which shared plugins are installed or available, to install, update, or adopt one, when a pushed change will reach everyone, or how to add or remove a shared package.
 ---
 
 # Plugin hub
 
 The Hub plugin keeps the plugins listed in `packages.json` of a public
-repository (setting `packagesRepo`, default `Timmmmmmer/bb-plugins`)
+repository (setting `packagesRepo`, default `lean-software-production/bb-plugins`)
 installed and up to date. Each plugin is a folder, `plugins/<name>/`. No
 tokens: bb installs each plugin from
 `git:https://github.com/<owner>/<repo>.git` with the folder as subdirectory.

@@ -13,7 +13,7 @@ repository, so **no GitHub token or login is needed**.
 ## Install
 
 ```sh
-bb plugin install git:https://github.com/Timmmmmmer/bb-plugins.git --subdirectory plugins/hub --yes
+bb plugin install git:https://github.com/lean-software-production/bb-plugins.git --subdirectory plugins/hub --yes
 ```
 
 That's all. The hub starts a sync right away and installs every plugin. Check
@@ -84,7 +84,7 @@ The hub also adds this repository's [`marketplace.json`](marketplace.json) to
 in bb's plugin store too. To add it by hand on a machine without the hub:
 
 ```sh
-bb marketplace add git:https://github.com/Timmmmmmer/bb-plugins.git
+bb marketplace add git:https://github.com/lean-software-production/bb-plugins.git
 ```
 
 Turn the automatic step off with `bb plugin config hub set registerMarketplace false`.

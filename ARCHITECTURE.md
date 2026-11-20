@@ -22,7 +22,7 @@ flowchart LR
     New["New user<br/>groups: Home"]
   end
 
-  subgraph Repo["Hub repo: github.com/Timmmmmmer/bb-plugins"]
+  subgraph Repo["Hub repo: github.com/lean-software-production/bb-plugins"]
     direction TB
     Groups["Groups<br/>lists of ✱ references"]
     Local["Local plugins<br/>folders in this repo"]
@@ -55,7 +55,7 @@ flowchart LR
     New["New user<br/>groups: Home<br/>(the Hub is the first install)"]
   end
 
-  subgraph Repo["Hub repo: github.com/Timmmmmmer/bb-plugins"]
+  subgraph Repo["Hub repo: github.com/lean-software-production/bb-plugins"]
     direction TB
     subgraph Groups["Groups (lists of ✱ references)"]
       Home["Home"]
@@ -125,7 +125,7 @@ subscribes to, so the team's plugins also show up in bb's plugin store.
 ```mermaid
 flowchart LR
   subgraph GitHub["GitHub (public)"]
-    Repo["Timmmmmmer/bb-plugins<br/>packages.json, plugins/, groups/*/"]
+    Repo["lean-software-production/bb-plugins<br/>packages.json, plugins/, groups/*/"]
     Action["GitHub Action<br/>scripts/build-marketplace.mjs"]
     Remote["Other public repos<br/>remote and followed plugins"]
   end

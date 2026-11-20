@@ -1,7 +1,7 @@
 // bb-plugin-hub — keeps the bb plugins listed in a public repository's
 // packages.json installed and up to date, and updates itself.
 //
-// Layout of the packages repository (default Timmmmmmer/bb-plugins):
+// Layout of the packages repository (default lean-software-production/bb-plugins):
 //   packages.json        which plugin folders every hub installs
 //   plugins/<name>/      one bb plugin per folder (this hub is plugins/hub)
 //
@@ -246,7 +246,8 @@ const parseRepo = (input: string): RepoRef => parseRepoInput(input).repo;
  * Repositories that are one repository under several names (a transfer or
  * rename: GitHub redirects the old URL, and installs keep the URL they were
  * made with). The first name is the key everything is stored under, so
- * moving the repository changes no stored state.
+ * moving the repository changes no stored state; the last is where it lives
+ * now, which the hub uses even when its setting names an older one.
  */
 const REPO_ALIASES: string[][] = [
   ["https://github.com/timmmmmmer/bb-plugins", "https://github.com/lean-software-production/bb-plugins"],
@@ -255,6 +256,14 @@ const plainRepoKey = (url: string) => url.toLowerCase().replace(/\/+$/u, "").rep
 const repoKey = (repo: RepoRef) => {
   const key = plainRepoKey(repo.url);
   return REPO_ALIASES.find((names) => names.includes(key))?.[0] ?? key;
+};
+/** The repository's current name (the last in its alias group): where it lives now. */
+const currentName = (repo: RepoRef): RepoRef => {
+  const names = REPO_ALIASES.find((group) => group.includes(plainRepoKey(repo.url)));
+  const latest = names?.at(-1);
+  if (latest === undefined || latest === plainRepoKey(repo.url)) return repo;
+  const [owner = "", name = ""] = latest.replace(/^https:\/\/github\.com\//u, "").split("/");
+  return { owner, name, url: `${latest}.git` };
 };
 /** The repository and its other names, as RepoRefs. */
 const repoAndAliases = (repo: RepoRef): RepoRef[] => {
@@ -608,7 +617,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Packages repository",
       description: "Public owner/name of the repository with packages.json and the plugins/ folders.",
-      default: "Timmmmmmer/bb-plugins",
+      default: "lean-software-production/bb-plugins",
     },
     groups: {
       type: "string",
@@ -663,7 +672,8 @@ export default async function plugin(bb: BbPluginApi) {
       .map((entry) => entry.trim().toLowerCase())
       .filter((entry) => GROUP_ID_PATTERN.test(entry) && entry !== HOME_GROUP);
     const beta = [...new Set(values.beta.split(/[\s,]+/u).map((entry) => entry.trim().toLowerCase()).filter((entry) => entry === "*" || ENTRY_ID_PATTERN.test(entry)))];
-    return { packagesRepo: parseRepo(values.packagesRepo), hubPath, selfUpdate: values.selfUpdate, subscribed: [...new Set(subscribed)], beta };
+    // A setting that names an old name of the repository means where it lives now.
+    return { packagesRepo: currentName(parseRepo(values.packagesRepo)), hubPath, selfUpdate: values.selfUpdate, subscribed: [...new Set(subscribed)], beta };
   }
 
   // -------------------------------------------------------------------------
