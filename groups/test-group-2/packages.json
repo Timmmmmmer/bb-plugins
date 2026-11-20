@@ -16,6 +16,9 @@
   "local": [
     {
       "path": "plugins/hello"
+    },
+    {
+      "path": "plugins/sidebar-text"
     }
   ]
 }

@@ -34,7 +34,8 @@
   ],
   "exclude": [
     "plugins/server-badge",
-    "plugins/hello"
+    "plugins/hello",
+    "plugins/sidebar-text"
   ],
   "remote": [],
   "uninstall": [],
