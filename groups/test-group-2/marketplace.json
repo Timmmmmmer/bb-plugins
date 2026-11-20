@@ -21,6 +21,23 @@
           "ref": "main"
         }
       }
+    },
+    {
+      "id": "sidebar-text",
+      "displayName": "Sidebar text",
+      "description": "Show a short message of your choice on its own page in the bb sidebar.",
+      "icon": "MessageSquare",
+      "author": {
+        "name": "Timmmmmmer",
+        "github": "Timmmmmmer"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/Timmmmmmer/bb-plugins.git",
+          "subdir": "plugins/sidebar-text",
+          "ref": "main"
+        }
+      }
     }
   ]
 }
