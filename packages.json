@@ -33,7 +33,8 @@
     "plugins/*"
   ],
   "exclude": [
-    "plugins/server-badge"
+    "plugins/server-badge",
+    "plugins/hello"
   ],
   "remote": [],
   "uninstall": [],
